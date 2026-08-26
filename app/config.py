@@ -166,8 +166,24 @@ POLICY: dict[tuple[str, int], tuple[str, int]] = {
 # ------------------------------------------------------------ copy constraints
 SYNTHETIC_DISCLOSURE = "[SYNTHETIC DEMO]"
 LINK_PLACEHOLDER = "{LINK}"
+AMOUNT_PLACEHOLDER = "{AMOUNT}"
 COPY_MAX_CHARS = 320
 COPY_FORBIDDEN = ("refund", "guarantee", "legal", "penalty", "last chance")
+
+# Copy is written as a SLOT SKELETON: drafted text may contain no digit of its own,
+# only these placeholders, which deterministic code substitutes with authoritative
+# values afterwards. The earlier design let a draft write the amount as digits and
+# then checked it matched, which rejected every otherwise-good sentence that
+# mentioned any other number ("within 24 hours", "attempt 2 of 3"). Slots are
+# strictly safer — a model that cannot type a digit cannot invent one — and they
+# let copy cite the bounds the system actually enforces.
+COPY_SLOTS: tuple[str, ...] = (
+    LINK_PLACEHOLDER,
+    AMOUNT_PLACEHOLDER,
+    "{MERCHANT}",
+    "{COOLDOWN_HOURS}",
+    "{PROMISE_HOURS}",
+)
 
 # Static templates exist for every (category, contact-action) pair, so the system is
 # fully functional with the copy LLM switched off (LLM_COPY_ENABLED=false or
@@ -177,45 +193,45 @@ _LINK = LINK_PLACEHOLDER
 _D = SYNTHETIC_DISCLOSURE
 STATIC_TEMPLATES: dict[tuple[str, str], str] = {
     ("card_expired", "SEND_UPDATE_LINK"):
-        f"{_D} Your subscription payment of Rs {{amount}} could not be completed because the card on "
+        f"{_D} Your subscription payment of Rs {{AMOUNT}} could not be completed because the card on "
         f"file has expired. Add a current card here: {_LINK}",
     ("card_expired", "PROMISE_TO_PAY"):
-        f"{_D} Your subscription payment of Rs {{amount}} is still pending. Tell us when you can pay "
+        f"{_D} Your subscription payment of Rs {{AMOUNT}} is still pending. Tell us when you can pay "
         f"and settle it here: {_LINK}",
 
     ("insufficient_funds", "SEND_UPDATE_LINK"):
-        f"{_D} We could not collect Rs {{amount}} for your subscription. You can pay it directly "
+        f"{_D} We could not collect Rs {{AMOUNT}} for your subscription. You can pay it directly "
         f"here: {_LINK}",
     ("insufficient_funds", "PROMISE_TO_PAY"):
-        f"{_D} We have tried collecting Rs {{amount}} for your subscription without success. Pay "
+        f"{_D} We have tried collecting Rs {{AMOUNT}} for your subscription without success. Pay "
         f"within three days to keep it active: {_LINK}",
 
     ("issuer_declined", "SEND_UPDATE_LINK"):
-        f"{_D} Your bank declined the subscription charge of Rs {{amount}}. You can complete the "
+        f"{_D} Your bank declined the subscription charge of Rs {{AMOUNT}}. You can complete the "
         f"payment or use another method here: {_LINK}",
     ("issuer_declined", "PROMISE_TO_PAY"):
-        f"{_D} The charge of Rs {{amount}} was declined by your bank. Settle it within three days "
+        f"{_D} The charge of Rs {{AMOUNT}} was declined by your bank. Settle it within three days "
         f"here: {_LINK}",
 
     ("authentication_failed", "SEND_UPDATE_LINK"):
-        f"{_D} The authentication for your subscription payment of Rs {{amount}} did not complete. "
+        f"{_D} The authentication for your subscription payment of Rs {{AMOUNT}} did not complete. "
         f"Here is a fresh secure link: {_LINK}",
     ("authentication_failed", "PROMISE_TO_PAY"):
-        f"{_D} Your subscription payment of Rs {{amount}} is still unauthenticated. Complete it "
+        f"{_D} Your subscription payment of Rs {{AMOUNT}} is still unauthenticated. Complete it "
         f"within three days: {_LINK}",
 
     ("invalid_payment_method", "SEND_UPDATE_LINK"):
-        f"{_D} The payment method saved for your subscription is no longer usable, so Rs {{amount}} "
+        f"{_D} The payment method saved for your subscription is no longer usable, so Rs {{AMOUNT}} "
         f"could not be collected. Add a new one here: {_LINK}",
     ("invalid_payment_method", "PROMISE_TO_PAY"):
-        f"{_D} We still could not collect Rs {{amount}} for your subscription. Add a working payment "
+        f"{_D} We still could not collect Rs {{AMOUNT}} for your subscription. Add a working payment "
         f"method within three days: {_LINK}",
 
     ("unknown", "SEND_UPDATE_LINK"):
-        f"{_D} A payment of Rs {{amount}} for your subscription did not go through. You can "
+        f"{_D} A payment of Rs {{AMOUNT}} for your subscription did not go through. You can "
         f"complete it here: {_LINK}",
     ("unknown", "PROMISE_TO_PAY"):
-        f"{_D} A payment of Rs {{amount}} for your subscription is outstanding. You can settle it "
+        f"{_D} A payment of Rs {{AMOUNT}} for your subscription is outstanding. You can settle it "
         f"here: {_LINK}",
 }
 

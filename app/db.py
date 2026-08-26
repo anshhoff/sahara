@@ -137,6 +137,13 @@ def execute(sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
         return cur
 
 
+def executemany(sql: str, rows: Iterable[Iterable[Any]]) -> None:
+    with _lock:
+        conn = get()
+        conn.executemany(sql, [tuple(r) for r in rows])
+        conn.commit()
+
+
 def insert(table: str, values: dict[str, Any]) -> None:
     cols = ", ".join(values)
     marks = ", ".join("?" for _ in values)

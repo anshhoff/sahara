@@ -141,3 +141,101 @@ def test_attempts_never_exceed_the_cap_across_a_long_lived_case(fresh_db, sim_cl
         p = failure_payload(event_id=f"SYNTH-evt-t-loop-{i}", pay_id=f"SYNTH-pay-t-{i}")
         webhooks.intake(p, source="synthetic")
     assert cases.get(case["id"])["attempt_count"] <= config.MAX_ATTEMPTS
+
+
+# --------------------------------------------------------------- concurrency
+def _scheduled_decision(case, action="RETRY_LATER", attempt=1):
+    """Insert a decision already past the deciding stage, ready for the executor."""
+    decision_id = db.new_id("dec")
+    now = clock.now_iso()
+    db.insert(
+        "intervention_decision",
+        {
+            "id": decision_id, "case_id": case["id"], "attempt_number": attempt,
+            "category": case["current_category"], "action": action,
+            "policy_row_ref": f"{case['current_category']}/{attempt}",
+            "invariant_check": "{}", "decided_at": now, "scheduled_for": now,
+            "status": "scheduled", "synthetic": case["synthetic"],
+        },
+    )
+    return db.row_to_dict(db.query_one("SELECT * FROM intervention_decision WHERE id = ?", (decision_id,)))
+
+
+def _race(targets):
+    """Run callables simultaneously — a barrier, so they genuinely overlap rather than
+    merely being submitted together."""
+    import threading
+
+    barrier = threading.Barrier(len(targets))
+    results: list = [None] * len(targets)
+
+    def run(i, fn):
+        barrier.wait()
+        try:
+            results[i] = fn()
+        except Exception as exc:  # a lost race must not surface as an exception
+            results[i] = exc
+
+    threads = [threading.Thread(target=run, args=(i, fn)) for i, fn in enumerate(targets)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+    return results
+
+
+def test_i1_holds_when_two_executions_race_for_the_last_attempt(fresh_db):
+    """The regression test for the attempt_count race.
+
+    invariants.check() only *reads* attempt_count, so with one attempt left two
+    concurrent executions both pass the gate. The cap is enforced by
+    cases.reserve_attempt(), whose conditional UPDATE lets exactly one of them win.
+    """
+    case = _open_case()
+    cases.set_category(case["id"], "insufficient_funds")
+    for _ in range(config.MAX_ATTEMPTS - 1):
+        cases.record_execution(case["id"], "RETRY_LATER")
+    assert cases.get(case["id"])["attempt_count"] == config.MAX_ATTEMPTS - 1
+
+    d1 = _scheduled_decision(cases.get(case["id"]), attempt=config.MAX_ATTEMPTS)
+    d2 = _scheduled_decision(cases.get(case["id"]), attempt=config.MAX_ATTEMPTS)
+    results = _race([lambda: executor.execute_decision(d1), lambda: executor.execute_decision(d2)])
+
+    assert not any(isinstance(r, Exception) for r in results), results
+    final = cases.get(case["id"])
+    assert final["attempt_count"] == config.MAX_ATTEMPTS, "I1 breached: the cap was exceeded"
+    assert len(db.query("SELECT id FROM execution_record WHERE case_id = ?", (case["id"],))) == 1
+    assert final["status"] == "stopped_max_attempts"
+
+
+def test_one_decision_executed_twice_produces_one_execution(fresh_db):
+    """The claim token: a decision picked up by two workers must move money once."""
+    case = _open_case()
+    cases.set_category(case["id"], "insufficient_funds")
+    decision = _scheduled_decision(cases.get(case["id"]))
+
+    results = _race([lambda: executor.execute_decision(decision),
+                     lambda: executor.execute_decision(decision)])
+
+    assert not any(isinstance(r, Exception) for r in results), results
+    assert len(db.query("SELECT id FROM execution_record WHERE case_id = ?", (case["id"],))) == 1
+    assert cases.get(case["id"])["attempt_count"] == 1
+
+
+def test_i2_receipt_says_not_applicable_when_it_could_not_be_evaluated(fresh_db, sim_clock):
+    """The pre-decision gate does not know the action yet, so I2 is unevaluable there.
+    Recording that as `pass` would claim a check that never ran."""
+    case = _open_case()
+    cases.set_category(case["id"], "card_expired")
+    cases.record_execution(case["id"], "SEND_UPDATE_LINK")   # cooldown is now in force
+
+    pre_decision = invariants.check(case["id"], phase="pre_decision")
+    assert pre_decision.details["I2"] == invariants.NOT_APPLICABLE
+
+    # A silent re-charge puts nothing in front of a person, so I2 stays inapplicable.
+    silent = invariants.check(case["id"], "RETRY_LATER", phase="pre_execution")
+    assert silent.details["I2"] == invariants.NOT_APPLICABLE
+
+    # Only a contact action actually engages the cooldown.
+    contact = invariants.check(case["id"], "SEND_UPDATE_LINK", phase="pre_execution")
+    assert contact.is_defer and contact.details["I2"].startswith("deferred")

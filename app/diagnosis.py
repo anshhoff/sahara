@@ -34,6 +34,12 @@ def apply_rules(event: dict[str, Any]) -> Optional[dict[str, Any]]:
             "llm_model": None,
             "llm_raw_response": None,
         }
+    # First hit wins, and `text` concatenates reason + description + code — so an error
+    # string carrying two rule keywords ("card expired" inside an issuer decline message,
+    # say) resolves by the order of config.RULES, not by specificity. That is
+    # deterministic and reproducible, but it is table order doing the deciding: adding a
+    # rule in the wrong position silently reclassifies traffic. Order is part of the
+    # rule table's contract, and test_rule_order_decides_an_ambiguous_string pins it.
     for rule_id, patterns, category in config.RULES:
         for pattern in patterns:
             if pattern in text:

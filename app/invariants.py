@@ -12,8 +12,14 @@ scheduled decision and its execution, for example.
 
   I1  max 3 attempts ever                 -> stopped_max_attempts
   I2  >= 24h between customer contacts    -> defer, or stopped_cooldown_expired
+      (evaluable only once an action is known — see check())
   I3  opt-out always stops                -> stopped_opt_out
   I4  unknown is never guessed            -> stopped_unknown
+
+I1 is *reported* here but *enforced* in cases.reserve_attempt(): this module only
+reads attempt_count, and a read cannot hold a cap against a concurrent execution.
+The gate below is the early, explanatory stop; the conditional UPDATE is the one
+that cannot be raced.
 
 Ordering is deliberate: consent (I3) beats everything, and refusing to act on an
 unknown cause (I4) beats attempt counting.
@@ -76,11 +82,31 @@ def episode_expired(case: dict[str, Any]) -> bool:
     return clock.now() >= episode_deadline(case)
 
 
+NOT_APPLICABLE = "not_applicable"
+
+
 def check(case_or_id: Any, proposed_action: Optional[str] = None, *, phase: str = "pre_decision") -> Verdict:
-    """Run I1–I4. `phase` is recorded on the decision's receipts, not branched on:
-    both phases run the identical checks against freshly loaded state."""
+    """Run the invariants that can be run, against freshly loaded state. `phase` is
+    recorded on the receipts, not branched on — the gates themselves are identical.
+
+    I1, I3 and I4 depend only on case state, so both phases evaluate them. I2 depends
+    on the *proposed action*, because the cooldown gates customer contact and not a
+    silent mandate re-charge. At the pre-decision gate the action has not been chosen
+    yet, so I2 is genuinely unevaluable there and its receipt says `not_applicable`
+    rather than `pass` — recording a check that did not run as one that passed would
+    make the audit trail claim more than it can support. Pre-execution always knows the
+    action, so that is where the cooldown is really enforced.
+    """
     case = _load(case_or_id)
-    details: dict[str, str] = {"I1": PASS, "I2": PASS, "I3": PASS, "I4": PASS, "phase": phase}
+    # I2's receipt reflects whether it was applicable, not merely whether it fired.
+    i2_applicable = proposed_action in config.CONTACT_ACTIONS
+    details: dict[str, str] = {
+        "I1": PASS,
+        "I2": PASS if i2_applicable else NOT_APPLICABLE,
+        "I3": PASS,
+        "I4": PASS,
+        "phase": phase,
+    }
 
     if int(case["customer_opted_out"]) == 1:
         details["I3"] = "violated"
@@ -97,7 +123,7 @@ def check(case_or_id: Any, proposed_action: Optional[str] = None, *, phase: str 
         return Verdict(STOP, details, "I1", "stopped_max_attempts",
                        reason=f"{case['attempt_count']} of {config.MAX_ATTEMPTS} attempts already executed")
 
-    if proposed_action in config.CONTACT_ACTIONS and case["last_contact_at"]:
+    if i2_applicable and case["last_contact_at"]:
         earliest = clock.plus_hours(clock.parse_iso(case["last_contact_at"]), config.COOLDOWN_HOURS)
         if clock.now() < earliest:
             if earliest > episode_deadline(case):

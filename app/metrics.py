@@ -35,12 +35,24 @@ def open_cases() -> list[str]:
 
 
 def _sum_amount(case_ids: list[str]) -> int:
+    """Sum the amount at risk over exactly these case ids.
+
+    The ids are staged in a temp table and joined, rather than expanded into an
+    `IN (?, ?, …)` list. An id list is one bind parameter each, and SQLite caps a
+    statement's parameters (999 on older builds), so the obvious version silently
+    works at demo scale and then fails on the first merchant with a thousand open
+    cases. A join has no such ceiling, and every metric here is defined as
+    "the total behind this id list" — so the traceability contract is unchanged.
+    """
     if not case_ids:
         return 0
-    marks = ",".join("?" for _ in case_ids)
+    db.execute("CREATE TEMP TABLE IF NOT EXISTS _traced_ids (id TEXT PRIMARY KEY)")
+    db.execute("DELETE FROM _traced_ids")
+    db.executemany("INSERT OR IGNORE INTO _traced_ids (id) VALUES (?)", ((i,) for i in case_ids))
     return int(db.scalar(
-        f"SELECT COALESCE(SUM(amount_at_risk_paise), 0) FROM recovery_case WHERE id IN ({marks})",
-        case_ids, 0,
+        "SELECT COALESCE(SUM(c.amount_at_risk_paise), 0) FROM recovery_case c"
+        " JOIN _traced_ids t ON t.id = c.id",
+        (), 0,
     ))
 
 

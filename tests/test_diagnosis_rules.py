@@ -57,3 +57,18 @@ def test_unmatched_text_falls_through_to_the_model():
 def test_every_rule_maps_into_the_fixed_enum():
     for _rule, _patterns, category in config.RULES:
         assert category in config.CATEGORIES
+
+
+def test_rule_order_decides_an_ambiguous_string():
+    """When one error string matches two rules, table order decides — not specificity,
+    not the longer match. This pins that contract so reordering config.RULES cannot
+    silently reclassify traffic: R1 precedes R2, so card_expired wins here."""
+    verdict = diagnosis.apply_rules({
+        "error_reason": "payment_failed",
+        "error_description": "The card has expired and the account has insufficient balance",
+        "error_code": ""})
+    assert verdict["matched_rule"] == "R1"
+    assert verdict["category"] == "card_expired"
+
+    order = [rule for rule, _patterns, _category in config.RULES]
+    assert order.index("R1") < order.index("R2"), "precedence above depends on this order"

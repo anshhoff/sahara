@@ -53,17 +53,21 @@ JSON only."""
 
 COPY_PROMPT = """Write one SMS to a customer whose subscription payment failed.
 
-Merchant: {merchant}
 Failure category: {category}
-Amount due: Rs {amount}
 Intent: {intent}
+
+Write a SLOT SKELETON, not finished text. Deterministic code substitutes every slot
+afterwards with authoritative values, so you never need to know any real figure.
 
 Hard requirements:
 - Begin with the literal text {disclosure}
-- Include the literal placeholder {link_placeholder} exactly once, at the end. Never write a URL.
-- The ONLY number anywhere in the message must be {amount}. No dates, no counts, no hours.
-- Under 300 characters. Plain, calm, factual. No emoji.
-- Never use the words: refund, guarantee, legal, penalty, last chance.
+- Include the literal slot {link_placeholder} exactly once, at the end. Never write a URL.
+- Refer to the amount due ONLY as the literal slot {amount_slot}. Never type an amount.
+- Write NO digits anywhere. If you need a number, use one of the slots below; if none
+  fits, spell it as a word or leave it out.
+- The only slots you may use: {slots}
+- Keep it short — well under three hundred characters. Plain, calm, factual. No emoji.
+- Never use the words: {forbidden}
 - Do not promise anything about the account beyond paying the amount due.
 
 Reply with the message text only."""
@@ -289,8 +293,14 @@ def classify(error_fields: dict[str, Any]) -> dict[str, Any]:
 
 # ----------------------------------------------------------- call #2: draft copy
 def draft_copy(category: str, action: str, amount_rupees: str, merchant_name: str) -> str:
-    """Draft notification copy. Raises on any provider problem; the executor's
-    caller catches and falls back to the static template."""
+    """Draft a notification copy *skeleton*. Raises on any provider problem; the
+    executor's caller catches and falls back to the static template.
+
+    `amount_rupees` and `merchant_name` are deliberately NOT sent to the model: copy is
+    drafted as slots and the real values are substituted by executor.render_slots()
+    afterwards. They stay in the signature because the caller holds them and the
+    boundary test asserts what does and does not cross it.
+    """
     if not copy_enabled():
         raise RuntimeError("copy drafting disabled")
     text = _chat(
@@ -299,12 +309,13 @@ def draft_copy(category: str, action: str, amount_rupees: str, merchant_name: st
             {
                 "role": "user",
                 "content": COPY_PROMPT.format(
-                    merchant=merchant_name,
                     category=category,
-                    amount=amount_rupees,
                     intent=INTENTS.get(action, "ask them to settle the amount due"),
                     disclosure=config.SYNTHETIC_DISCLOSURE,
                     link_placeholder=config.LINK_PLACEHOLDER,
+                    amount_slot=config.AMOUNT_PLACEHOLDER,
+                    slots=", ".join(sorted(config.COPY_SLOTS)),
+                    forbidden=", ".join(config.COPY_FORBIDDEN),
                 ),
             },
         ],

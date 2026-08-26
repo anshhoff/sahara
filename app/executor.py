@@ -54,22 +54,43 @@ def razorpay_configured() -> bool:
 _NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
 
 
-def _as_float(text: str) -> float | None:
-    try:
-        return float(text)
-    except ValueError:
-        return None
-
-
 def _amount_str(case: dict[str, Any]) -> str:
     paise = int(case["amount_at_risk_paise"])
     rupees = paise / 100
     return str(int(rupees)) if rupees == int(rupees) else f"{rupees:.2f}"
 
 
+_SLOT_RE = re.compile(r"\{[A-Za-z_]+\}")
+
+
+def slot_values(case: dict[str, Any]) -> dict[str, str]:
+    """Authoritative value for every slot except {LINK}, which is injected later —
+    only once a real URL exists (docs/04 §6.3)."""
+    return {
+        config.AMOUNT_PLACEHOLDER: _amount_str(case),
+        "{MERCHANT}": config.MERCHANT_NAME,
+        "{COOLDOWN_HOURS}": str(config.COOLDOWN_HOURS),
+        "{PROMISE_HOURS}": str(config.PROMISE_WINDOW_HOURS),
+    }
+
+
+def render_slots(text: str, case: dict[str, Any]) -> str:
+    """Substitute every slot but {LINK}. Runs only after validate_copy has approved
+    the skeleton, so no unvetted text can reach a customer."""
+    for slot, value in slot_values(case).items():
+        text = text.replace(slot, value)
+    return text
+
+
 def validate_copy(text: str, case: dict[str, Any]) -> dict[str, Any]:
-    """Deterministic gate on drafted copy. Every rule is checkable and each failure
-    is stored verbatim on the ExecutionRecord (docs/04 §6.3)."""
+    """Deterministic gate on a drafted copy *skeleton*. Every rule is checkable and
+    each failure is stored verbatim on the ExecutionRecord (docs/04 §6.3).
+
+    The central rule is that the draft may contain no digit at all. Numbers arrive
+    only by slot substitution afterwards, so an invented figure — the one
+    hallucination that would move real money if it reached a customer — is not
+    merely detected, it is unrepresentable.
+    """
     problems: list[str] = []
     t = text or ""
 
@@ -82,32 +103,42 @@ def validate_copy(text: str, case: dict[str, Any]) -> dict[str, Any]:
     if "http://" in t or "https://" in t:
         problems.append("draft contains a literal URL; links are injected by code only")
 
-    allowed = _amount_str(case)
-    allowed_value = float(allowed)
-    numbers = [m.group(0).replace(",", "") for m in _NUMBER_RE.finditer(t)]
-    # Compared numerically so "499" and "499.00" are the same amount, while "4990" is
-    # emphatically not: an invented figure is the one hallucination that would move
-    # real money if it ever reached a customer.
-    stray = [n for n in numbers if _as_float(n) != allowed_value]
-    if stray:
-        problems.append(f"numbers other than the case amount {allowed}: {sorted(set(stray))}")
+    unknown = sorted({s for s in _SLOT_RE.findall(t) if s not in config.COPY_SLOTS})
+    if unknown:
+        problems.append(f"unknown slots {unknown}; allowed: {sorted(config.COPY_SLOTS)}")
+
+    # Digits are counted on the skeleton with its slots removed, so {AMOUNT} is fine
+    # and a typed "499" is not — even when it happens to be the correct amount.
+    skeleton = _SLOT_RE.sub("", t)
+    literals = sorted({m.group(0) for m in _NUMBER_RE.finditer(skeleton)})
+    if literals:
+        problems.append(
+            f"literal numbers {literals}; copy must use slots "
+            f"({config.AMOUNT_PLACEHOLDER} etc.), never typed digits"
+        )
 
     lowered = t.lower()
     hits = [w for w in config.COPY_FORBIDDEN if w in lowered]
     if hits:
         problems.append(f"forbidden words: {hits}")
 
-    if len(t) > config.COPY_MAX_CHARS:
-        problems.append(f"length {len(t)} exceeds {config.COPY_MAX_CHARS}")
+    # Length is measured on what would actually be sent, not on the shorter skeleton.
+    rendered = render_slots(t, case)
+    if len(rendered) > config.COPY_MAX_CHARS:
+        problems.append(f"rendered length {len(rendered)} exceeds {config.COPY_MAX_CHARS}")
 
-    return {"ok": not problems, "problems": problems, "length": len(t), "amount_allowed": allowed}
+    return {
+        "ok": not problems,
+        "problems": problems,
+        "length": len(rendered),
+        "amount_allowed": _amount_str(case),
+    }
 
 
 def static_template(category: str, action: str, case: dict[str, Any]) -> str:
-    tpl = config.STATIC_TEMPLATES[(category or "unknown", action)]
-    # A plain replace, not .format(): the template also carries the literal {LINK}
-    # placeholder, which code injects later and format() would try to interpolate.
-    return tpl.replace("{amount}", _amount_str(case))
+    """The raw skeleton, slots intact. Templates and model drafts take the identical
+    validate-then-render path, so the fallback is held to the same rules as the LLM."""
+    return config.STATIC_TEMPLATES[(category or "unknown", action)]
 
 
 def build_copy(case: dict[str, Any], action: str) -> tuple[str, str, dict[str, Any]]:
@@ -126,7 +157,7 @@ def build_copy(case: dict[str, Any], action: str) -> tuple[str, str, dict[str, A
             validation["source"] = "llm_draft"
             validation["draft"] = draft
             if validation["ok"]:
-                return draft, "llm_draft", validation
+                return render_slots(draft, case), "llm_draft", validation
             log.info("LLM copy rejected for case %s: %s", case["id"], validation["problems"])
         except Exception as exc:
             validation = {"ok": False, "problems": [f"llm error: {type(exc).__name__}: {exc}"],
@@ -139,7 +170,7 @@ def build_copy(case: dict[str, Any], action: str) -> tuple[str, str, dict[str, A
         raise AssertionError(
             f"static template for ({category}, {action}) fails copy validation: {fallback_check['problems']}"
         )
-    return text, "static_template", validation
+    return render_slots(text, case), "static_template", validation
 
 
 def inject_link(text: str, url: str) -> str:
@@ -185,6 +216,10 @@ def _create_payment_link(case: dict[str, Any], description: str) -> tuple[Option
     if _live_link_budget <= 0 or not razorpay_configured():
         return None, None, {"skipped": "live link budget exhausted or Razorpay not configured"}
     try:
+        # Spent before the call and never refunded on failure — deliberately
+        # fail-closed. A refund-on-error would let a persistently failing endpoint be
+        # retried without bound, which is exactly the rate-limit the budget exists to
+        # respect. Over-counting a link costs a demo; under-counting costs the account.
         _live_link_budget -= 1
         resp = razorpay_client().payment_link.create(
             {
@@ -309,6 +344,38 @@ def execute_decision(decision: dict[str, Any]) -> Optional[dict[str, Any]]:
     if handler is None:  # STOP_HANDOFF never reaches the executor; policy closes the case
         raise ValueError(f"action {decision['action']} is not executable")
 
+    # Claim the decision before doing anything irreversible. The conditional UPDATE is
+    # the claim token: exactly one caller can move it off 'scheduled', so a decision
+    # picked up twice — two overlapping ticks, or a tick racing the webhook path —
+    # creates one Payment Link, not two. Losing the claim means someone else owns this
+    # execution, so return without touching the case.
+    if db.execute(
+        "UPDATE intervention_decision SET status = 'executed' WHERE id = ? AND status = 'scheduled'",
+        (decision["id"],),
+    ).rowcount != 1:
+        log.info("decision %s already claimed by another worker", decision["id"])
+        return None
+
+    # Then claim the attempt itself. This is where I1 is actually enforced: the gate
+    # above only *read* attempt_count, and another thread can execute between that read
+    # and this line. reserve_attempt refuses at the cap atomically.
+    if not cases.reserve_attempt(case["id"], decision["action"]):
+        db.update("intervention_decision", decision["id"], {"status": "blocked_by_invariant"})
+        cases.transition(
+            case["id"], "stopped_max_attempts",
+            summary=(f"Attempt {decision['attempt_number']} blocked at execution by I1: "
+                     f"all {config.MAX_ATTEMPTS} attempts were already consumed"),
+            detail={
+                "invariant": "I1",
+                "invariant_rule": invariants.INVARIANT_TEXT["I1"],
+                "phase": "pre_execution",
+                "decision_id": decision["id"],
+                "blocked_action": decision["action"],
+                "note": "attempt slot lost to a concurrent execution",
+            },
+        )
+        return None
+
     try:
         result = handler(case)
     except Exception as exc:
@@ -342,9 +409,8 @@ def execute_decision(decision: dict[str, Any]) -> Optional[dict[str, Any]]:
             "synthetic": case["synthetic"],
         },
     )
-    db.update("intervention_decision", decision["id"], {"status": "executed"})
-    cases.record_execution(case["id"], decision["action"])
-
+    # The decision was already marked executed when it was claimed, and the attempt was
+    # consumed by reserve_attempt() before the handler ran.
     audit.audit(
         case["id"], "execute", "system",
         (f"Attempt {decision['attempt_number']}: {decision['action']} executed via {result['mode']} "

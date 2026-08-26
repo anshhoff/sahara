@@ -100,14 +100,56 @@ def set_opted_out(case_id: str, opted_out: bool = True) -> dict[str, Any]:
     return touch(case_id, customer_opted_out=1 if opted_out else 0)
 
 
+# The increment is computed by SQLite, never in Python. A read-modify-write here
+# would let two concurrent callers both read the same attempt_count and both write
+# count+1, losing an attempt and taking I1 with it. last_contact_at is written in the
+# same statement, guarded by a flag, so a contact action can never bump the counter
+# without also arming the I2 cooldown.
+_SET_ATTEMPT = (
+    " SET attempt_count = attempt_count + 1,"
+    "     updated_at = ?,"
+    "     last_contact_at = CASE WHEN ? THEN ? ELSE last_contact_at END"
+)
+_RESERVE_ATTEMPT_SQL = (
+    "UPDATE recovery_case" + _SET_ATTEMPT
+    + " WHERE id = ? AND status = 'open' AND attempt_count < ?"
+)
+_RECORD_ATTEMPT_SQL = "UPDATE recovery_case" + _SET_ATTEMPT + " WHERE id = ?"
+
+
+def _attempt_params(action: str) -> list[Any]:
+    now = clock.now_iso()
+    return [now, 1 if action in config.CONTACT_ACTIONS else 0, now]
+
+
+def reserve_attempt(case_id: str, action: str) -> bool:
+    """Atomically claim one attempt slot, or refuse. True iff this caller now owns it.
+
+    This is I1's real enforcement point. `invariants.check` reads attempt_count and
+    then returns, so between that read and the execution another thread can execute
+    and increment — in live mode the webhook path and the tick loop genuinely run
+    concurrently (main.py dispatches both through asyncio.to_thread). A gate that only
+    reads cannot close that window; one conditional UPDATE can, because SQLite applies
+    it atomically.
+
+    Losing the race means rowcount == 0 and no attempt is consumed, so the caller must
+    not execute. The slot is claimed *before* the intervention runs rather than after,
+    which is also the honest ordering: a failed execution has still spent an attempt,
+    and that is exactly what the previous post-hoc increment recorded.
+    """
+    cur = db.execute(_RESERVE_ATTEMPT_SQL, _attempt_params(action) + [case_id, config.MAX_ATTEMPTS])
+    return cur.rowcount == 1
+
+
 def record_execution(case_id: str, action: str) -> dict[str, Any]:
-    """Called by the executor only: bumps attempt_count and, for contact actions,
-    last_contact_at. attempt_count counts *executed* interventions, never decisions."""
-    case = get(case_id)
-    fields: dict[str, Any] = {"attempt_count": int(case["attempt_count"]) + 1}
-    if action in config.CONTACT_ACTIONS:
-        fields["last_contact_at"] = clock.now_iso()
-    return touch(case_id, **fields)
+    """Unconditionally bump attempt_count (and last_contact_at for contact actions).
+
+    Drives a case's counters directly in tests and fixtures. The executor uses
+    reserve_attempt() instead, because it must be refused at the cap rather than
+    pushed past it.
+    """
+    db.execute(_RECORD_ATTEMPT_SQL, _attempt_params(action) + [case_id])
+    return get(case_id)
 
 
 def transition(case_id: str, new_status: str, *, summary: str, detail: dict[str, Any] | None = None,
