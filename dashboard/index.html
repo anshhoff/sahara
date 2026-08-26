@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Failed Subscription Recovery Agent</title>
+<!--
+  Read-only reporting UI over the SQLite data (docs/06).
+  Deliberate non-goals, do not add them: no auth, no realtime/polling, no mobile
+  breakpoints, no build step, no CDN — the demo must survive a dead conference
+  network. Charts are width-percentage divs, so there is no charting dependency.
+-->
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div>
+    <h1>Failed Subscription Recovery Agent</h1>
+    <p class="sub">Razorpay AI Buildathon &middot; Track 03 — AI Revenue Recovery</p>
+  </div>
+  <div class="header-right">
+    <span id="bounds" class="bounds"></span>
+    <button id="refresh" type="button">Refresh</button>
+  </div>
+</header>
+
+<main>
+  <section id="tiles" class="tiles" aria-label="Summary metrics"></section>
+
+  <div id="banner" class="banner" role="note"></div>
+
+  <section class="panel">
+    <h2>Recovery by diagnosed failure category</h2>
+    <table id="categories" class="grid">
+      <thead>
+        <tr>
+          <th>Category</th><th class="num">Cases</th><th class="num">Recovered</th>
+          <th class="num">Recovery rate</th><th class="num">₹ recovered</th>
+          <th class="num">Stopped</th><th class="bar-col">Recovery rate</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Cases</h2>
+      <div class="filters">
+        <label>Status <select id="f-status"><option value="">all</option></select></label>
+        <label>Category <select id="f-category"><option value="">all</option></select></label>
+        <span id="case-count" class="muted"></span>
+      </div>
+    </div>
+    <table id="cases" class="grid clickable">
+      <thead>
+        <tr>
+          <th>Case</th><th>Subscription</th><th>Category</th><th class="num">Amount</th>
+          <th class="num">Attempts</th><th>Status</th><th>Data</th><th>Updated</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section id="detail" class="panel hidden">
+    <div class="panel-head">
+      <h2>Case file <span id="detail-id" class="mono"></span></h2>
+      <button id="close-detail" type="button">Close</button>
+    </div>
+    <div id="detail-body"></div>
+  </section>
+</main>
+
+<footer>
+  <span>Every number on this page is a SQL query over <code>recovery.db</code> — no cached
+  aggregates. Trace one with <code>/api/metrics/trace/recovered</code>.</span>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

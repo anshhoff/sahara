@@ -1,0 +1,34 @@
+{
+  "entity": "event",
+  "account_id": "acc_TTb1aueK8O5zPn",
+  "event": "payment.failed",
+  "contains": [
+    "payment"
+  ],
+  "created_at": 1787573509,
+  "id": "evt_LIVEPROOF000001",
+  "payload": {
+    "payment": {
+      "entity": {
+        "id": "pay_LIVEPROOF000001",
+        "entity": "payment",
+        "amount": 49900,
+        "currency": "INR",
+        "status": "failed",
+        "invoice_id": "inv_LIVEPROOF01",
+        "subscription_id": "sub_LIVEPROOF01",
+        "customer_id": "cust_LIVEPROOF01",
+        "method": "card",
+        "error_code": "BAD_REQUEST_ERROR",
+        "error_description": "Your payment failed due to insufficient funds in the account.",
+        "error_source": "bank",
+        "error_step": "payment_authorization",
+        "error_reason": "insufficient_funds",
+        "created_at": 1787573509,
+        "notes": {
+          "case_id": "LIVE-WEBHOOK-01"
+        }
+      }
+    }
+  }
+}

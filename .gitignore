@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+recovery.db
+recovery.db-journal
+*.db
+synthetic_cases.json
+.pytest_cache/
+.DS_Store
+.claude/
+*.db-shm
+*.db-wal
