@@ -94,8 +94,29 @@ def init(path: Optional[str] = None) -> sqlite3.Connection:
     conn = connect(path)
     with open(config.SCHEMA_PATH, "r", encoding="utf-8") as fh:
         conn.executescript(fh.read())
+    _migrate(conn)
     conn.commit()
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Bring a database created by an older schema up to date.
+
+    `CREATE TABLE IF NOT EXISTS` is a no-op on a table that already exists, so a column
+    added to schema.sql never reaches a database someone already has. Each step below
+    is idempotent and additive; none rewrites or drops existing rows.
+
+    (The status CHECK constraint cannot be widened in place without rebuilding the
+    table. An older database therefore accepts the new is_holdout column but would
+    reject a `stopped_holdout` status — which is correct: that database has no control
+    arm in it, so nothing can legitimately land in that state. A fresh run gets the
+    full constraint.)
+    """
+    have = {r["name"] for r in conn.execute("PRAGMA table_info(recovery_case)").fetchall()}
+    if have and "is_holdout" not in have:
+        conn.execute(
+            "ALTER TABLE recovery_case ADD COLUMN is_holdout INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 def reset(path: Optional[str] = None) -> sqlite3.Connection:

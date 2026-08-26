@@ -473,11 +473,22 @@ def _close_expired_episodes() -> int:
     for row in db.query("SELECT * FROM recovery_case WHERE status = 'open'"):
         case = db.row_to_dict(row)
         if invariants.episode_expired(case):
+            # A control-arm case reaching the end of its window was never intervened
+            # on, so it closes under its own reason rather than being mixed in with
+            # cases the agent tried and could not recover.
+            holdout = int(case.get("is_holdout") or 0) == 1
             cases.transition(
-                case["id"], "stopped_cooldown_expired",
-                summary=(f"Episode window of {config.EPISODE_WINDOW_DAYS} days closed without recovery; "
-                         "handed off to the human queue"),
+                case["id"],
+                "stopped_holdout" if holdout else "stopped_cooldown_expired",
+                summary=(
+                    f"Control arm: observed for the full {config.EPISODE_WINDOW_DAYS}-day window "
+                    "with no intervention, and did not recover on its own"
+                    if holdout else
+                    f"Episode window of {config.EPISODE_WINDOW_DAYS} days closed without recovery; "
+                    "handed off to the human queue"
+                ),
                 detail={"created_at": case["created_at"],
+                        "arm": "control" if holdout else "treated",
                         "episode_deadline": clock.to_iso(invariants.episode_deadline(case))},
             )
             closed += 1

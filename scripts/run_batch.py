@@ -43,9 +43,28 @@ SUCCESS_PROBABILITY: dict[tuple[str, str], list[float]] = {
 DEFAULT_FOLLOWUP_HOURS = 24  # next dunning cycle after an unanswered contact
 RETRY_RESULT_HOURS = 1       # a silent re-charge resolves quickly
 
+# Baseline: the chance a failed charge comes back WITHOUT any intervention, inside the
+# episode window — the customer tops up, or the issuer stops declining, and Razorpay's
+# own retry then succeeds. This is the counterfactual the control arm exists to
+# measure, and it is the single most consequential assumption in the whole batch:
+# set it to zero and the agent appears to earn every rupee it touches.
+#
+# The ordering is the defensible part, not the exact values. An expired card does not
+# un-expire, so card_expired is near zero; an empty account often refills by payday,
+# so insufficient_funds is the highest. Assumptions, not measurements (docs/05 §6).
+BASELINE_RECOVERY_PROBABILITY: dict[str, float] = {
+    "insufficient_funds": 0.22,
+    "issuer_declined": 0.14,
+    "authentication_failed": 0.09,
+    "unknown": 0.06,
+    "invalid_payment_method": 0.03,
+    "card_expired": 0.02,
+}
+
 
 class Runner:
-    def __init__(self, data: dict[str, Any], rng: random.Random, live_links: int):
+    def __init__(self, data: dict[str, Any], rng: random.Random, live_links: int,
+                 holdout_fraction: float = 0.0):
         self.meta = data.get("meta", {})
         self.cases = data["cases"]
         self.rng = rng
@@ -54,6 +73,12 @@ class Runner:
         self.pending: list[tuple[str, dict[str, Any]]] = []  # (due_iso, payload)
         self.event_counter: dict[str, int] = {}
         self.opted_out_done: set[str] = set()
+        self.holdout_fraction = holdout_fraction
+        # A LIST, not a set: this is iterated while consuming the seeded RNG, and set
+        # iteration order over strings varies per process (hash randomisation), which
+        # would make an identical seed produce different numbers on every run.
+        self.control_subs: list[str] = []
+        self.baseline_rolled: set[str] = set()
         executor.set_live_link_budget(live_links)
 
     # ------------------------------------------------------------- utilities
@@ -150,6 +175,30 @@ class Runner:
         p = probs[min(attempt, len(probs)) - 1]
         return self.rng.random() < p
 
+    def roll_baseline_for_control(self) -> None:
+        """Decide, once per control case, whether it recovers on its own.
+
+        A control case is never executed against, so process_new_executions() never
+        sees it. Its outcome is drawn here instead, from BASELINE_RECOVERY_PROBABILITY,
+        and lands as an ordinary recovery webhook at a random point in the window —
+        the same event type, through the same intake(), as any treated recovery.
+        """
+        for sub_id in self.control_subs:
+            if sub_id in self.baseline_rolled:
+                continue
+            case = case_store.find_latest_by_subscription(sub_id)
+            if case is None or not case["current_category"]:
+                continue          # not diagnosed yet; roll on a later pass
+            self.baseline_rolled.add(sub_id)
+            p = BASELINE_RECOVERY_PROBABILITY.get(case["current_category"], 0.05)
+            if self.rng.random() >= p:
+                continue
+            # Self-recovery is slow: it waits on a payday or an issuer, not on us.
+            when = clock.parse_iso(case["created_at"]) + timedelta(
+                hours=self.rng.randint(24, config.EPISODE_WINDOW_DAYS * 24 - 1))
+            self._enqueue(when, self._recovery_event(
+                sub_id, case["id"], "subscription.charged", when))
+
     def process_new_executions(self) -> None:
         rows = db.query("SELECT * FROM execution_record ORDER BY rowid")
         for row in rows:
@@ -229,11 +278,18 @@ class Runner:
             sub_id = self._sub_id(case)
             self.profiles[sub_id] = case
             self.event_counter[sub_id] = 1
+            # Randomised assignment, drawn from the same seeded stream as every other
+            # decision in the batch, so an arm split is reproducible like anything else.
+            if self.holdout_fraction > 0 and self.rng.random() < self.holdout_fraction:
+                self.control_subs.append(sub_id)
+                case["initial_event"] = json.loads(json.dumps(case["initial_event"]))
+                case["initial_event"]["holdout"] = True
             webhooks.intake(case["initial_event"], source="synthetic")
             if case["profile"].get("duplicate_delivery"):
                 # Exactly the same event id, delivered twice (SYNTH-E-06).
                 webhooks.intake(case["initial_event"], source="synthetic")
         self.process_new_executions()
+        self.roll_baseline_for_control()
 
         start = clock.now()
         sim = clock.get_clock()
@@ -244,6 +300,7 @@ class Runner:
             self.deliver_due_events()
             executor.tick()
             self.process_new_executions()
+            self.roll_baseline_for_control()
             self.apply_mid_flight_opt_outs()
             sim.advance(hours=1)
         executor.tick()  # final sweep: close anything the last hour made due
@@ -311,6 +368,15 @@ def acceptance_checks() -> list[tuple[str, bool, str]]:
         "SELECT COUNT(*) FROM audit_log WHERE synthetic = 0", (), 0))
     check("synthetic = 1 on 100% of batch-derived rows", non_synth == 0, f"{non_synth} rows not flagged")
 
+    bad = db.query(
+        "SELECT e.id AS id FROM execution_record e JOIN recovery_case c ON c.id = e.case_id"
+        " WHERE c.is_holdout = 1")
+    check("control arm received zero interventions", not bad, ", ".join(r["id"] for r in bad))
+
+    bad = db.query(
+        "SELECT id FROM recovery_case WHERE is_holdout = 1 AND attempt_count > 0")
+    check("control arm consumed zero attempts", not bad, ", ".join(r["id"] for r in bad))
+
     rec = metrics.reconciliation()
     check("reconciliation: recovered + stopped + open == cases", rec["counts_balance"], json.dumps(rec))
     check("reconciliation: recovered <= at risk", rec["amounts_balance"], "")
@@ -377,6 +443,21 @@ def print_summary(runner: Runner, accuracy: dict[str, Any]) -> None:
         b = acc[method]
         pct = "-" if b["accuracy"] is None else f"{b['accuracy'] * 100:.1f}%"
         print(f"  classification accuracy ({method}): {pct}  ({b['correct']}/{b['n']})")
+    inc = s.get("incremental") or {}
+    if inc.get("available"):
+        t, c = inc["treated"], inc["control"]
+        lo, hi = inc["lift_ci95"]
+        print("\n  INCREMENTAL RECOVERY (randomised control arm, intention-to-treat)")
+        print(f"    treated       {t['recovered']}/{t['n']}  = {t['rate'] * 100:.1f}%")
+        print(f"    control       {c['recovered']}/{c['n']}  = {c['rate'] * 100:.1f}%")
+        print(f"    lift          {inc['lift'] * 100:+.1f} pp   95% CI [{lo * 100:+.1f}, {hi * 100:+.1f}] pp"
+              f"   ({'excludes' if inc['significant'] else 'includes'} zero)")
+        mlo, mhi = inc["incremental_paise_ci95"]
+        print(f"    incremental   Rs {inc['incremental_paise_total'] / 100:,.0f}"
+              f"   95% CI [Rs {mlo / 100:,.0f}, Rs {mhi / 100:,.0f}]"
+              f"   of gross Rs {inc['gross_recovered_paise'] / 100:,.0f}")
+        print("    NOTE: outcome probabilities are assumptions; this measures the mechanism,")
+        print("          not the market. The interval is sampling uncertainty only.")
     if accuracy["misses"]:
         print("  misclassified:")
         for m in accuracy["misses"][:10]:
@@ -392,6 +473,10 @@ def main() -> int:
     ap.add_argument("--live-links", type=int, default=0,
                     help="cap on REAL Razorpay test-mode Payment Links to create (default 0)")
     ap.add_argument("--seed", type=int, default=None, help="override the outcome-model seed")
+    ap.add_argument("--holdout", type=float, default=0.0, metavar="FRACTION",
+                    help="fraction of cases held out as an untreated control arm, so recovery "
+                         "can be reported as incremental rather than gross (default 0.0 = no "
+                         "control arm, which reproduces the frozen batch exactly)")
     ap.add_argument("--keep", action="store_true", help="append to an existing database instead of resetting it")
     args = ap.parse_args()
 
@@ -417,7 +502,10 @@ def main() -> int:
               "         Every ambiguous case will stop as `unknown` and this run will still\n"
               "         exit 0 with green checks. Run `python scripts/check_llm.py` first.\n")
 
-    runner = Runner(data, random.Random(seed), args.live_links)
+    if not 0.0 <= args.holdout < 1.0:
+        print("--holdout must be in [0.0, 1.0)")
+        return 2
+    runner = Runner(data, random.Random(seed), args.live_links, args.holdout)
     print(f"running {len(data['cases'])} synthetic cases on a simulated clock from "
           f"{clock.now_iso()} (seed {seed}, live links {args.live_links}, "
           f"LLM {config.LLM_PROVIDER})")

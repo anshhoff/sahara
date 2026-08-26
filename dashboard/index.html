@@ -2,79 +2,190 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Failed Subscription Recovery Agent</title>
 <!--
   Read-only reporting UI over the SQLite data (docs/06).
-  Deliberate non-goals, do not add them: no auth, no realtime/polling, no mobile
-  breakpoints, no build step, no CDN — the demo must survive a dead conference
-  network. Charts are width-percentage divs, so there is no charting dependency.
+
+  Every section answers one question a reader actually has, in order: did it work,
+  what did it do, what does it refuse to do, how does it choose, and where is the
+  model. The guardrail and policy sections are rendered from /api/mechanism rather
+  than written here, so the dashboard cannot describe rules the code no longer runs.
+
+  Deliberate non-goals, do not add them: no auth, no realtime/polling, no build step,
+  no CDN, no webfont — the demo must survive a dead conference network. Charts are
+  hand-built divs and inline SVG, so there is no charting dependency.
 -->
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+
 <header>
-  <div>
-    <h1>Failed Subscription Recovery Agent</h1>
-    <p class="sub">Razorpay AI Buildathon &middot; Track 03 — AI Revenue Recovery</p>
+  <div class="head-top">
+    <div>
+      <h1>Failed Subscription Recovery Agent</h1>
+      <p class="sub">Razorpay AI Buildathon &middot; Track 03 — AI Revenue Recovery</p>
+      <div class="chips" id="chips"></div>
+    </div>
+    <div class="head-right">
+      <button id="expand" class="ghost" type="button">Expand all detail</button>
+      <button id="refresh" type="button">Refresh</button>
+    </div>
   </div>
-  <div class="header-right">
-    <span id="bounds" class="bounds"></span>
-    <button id="refresh" type="button">Refresh</button>
-  </div>
+  <nav class="sections" id="secnav">
+    <a href="#overview">Overview</a>
+    <a href="#effect">Did it work?</a>
+    <a href="#loop">The loop</a>
+    <a href="#guardrails">What it refuses to do</a>
+    <a href="#decides">How it chooses</a>
+    <a href="#model">Where the model is</a>
+    <a href="#breakdown">By failure cause</a>
+    <a href="#cases">Cases</a>
+  </nav>
 </header>
 
 <main>
-  <section id="tiles" class="tiles" aria-label="Summary metrics"></section>
-
   <div id="banner" class="banner" role="note"></div>
 
-  <section class="panel">
-    <h2>Recovery by diagnosed failure category</h2>
-    <table id="categories" class="grid">
-      <thead>
-        <tr>
-          <th>Category</th><th class="num">Cases</th><th class="num">Recovered</th>
-          <th class="num">Recovery rate</th><th class="num">₹ recovered</th>
-          <th class="num">Stopped</th><th class="bar-col">Recovery rate</th>
-        </tr>
-      </thead>
-      <tbody></tbody>
-    </table>
+  <!-- ------------------------------------------------------------ overview -->
+  <section id="overview">
+    <div class="sec-head"><h2>Overview</h2><span class="q">What is at stake, and what came back.</span></div>
+    <div id="tiles" class="tiles" aria-label="Summary metrics"></div>
   </section>
 
-  <section class="panel">
-    <div class="panel-head">
-      <h2>Cases</h2>
-      <div class="filters">
-        <label>Status <select id="f-status"><option value="">all</option></select></label>
-        <label>Category <select id="f-category"><option value="">all</option></select></label>
+  <!-- -------------------------------------------------------------- effect -->
+  <section id="effect">
+    <div class="sec-head">
+      <h2>Did it work?</h2>
+      <span class="q">Money recovered <em>because of</em> the agent — not merely alongside it.</span>
+    </div>
+    <p class="sec-note">
+      Gross recovery cannot tell the two apart: some failed charges come back on their own when a
+      customer tops up or an issuer stops declining. A randomised slice of cases is therefore held
+      out — detected and diagnosed like any other, then never intervened on. The gap between the arms
+      is the agent's effect; everything else would have happened anyway.
+    </p>
+    <div class="panel" id="effect-panel"></div>
+  </section>
+
+  <!-- ---------------------------------------------------------------- loop -->
+  <section id="loop">
+    <div class="sec-head"><h2>The loop</h2><span class="q">What actually happened to the events that arrived.</span></div>
+    <p class="sec-note">
+      Every number below is a row count in the database. Two gates sit inside the loop — one before a
+      decision is made, one immediately before it executes — because state can change in between.
+    </p>
+    <div class="panel"><div class="flow" id="flow"></div></div>
+  </section>
+
+  <!-- ---------------------------------------------------------- guardrails -->
+  <section id="guardrails">
+    <div class="sec-head">
+      <h2>What it refuses to do</h2>
+      <span class="q">The part of the system that says no.</span>
+    </div>
+    <p class="sec-note">
+      Four invariants, enforced in a module that imports neither the policy table nor the model — so a
+      wrong policy cell cannot route around them and no model output can reach them. They are checked
+      before a decision <em>and</em> again before execution. The counts are live: this is how often each
+      one actually stopped or delayed something in this batch.
+    </p>
+    <div class="guards" id="guards"></div>
+  </section>
+
+  <!-- ------------------------------------------------------------- decides -->
+  <section id="decides">
+    <div class="sec-head"><h2>How it chooses</h2><span class="q">A lookup, not a judgement call.</span></div>
+    <p class="sec-note">
+      The intervention comes from a static table indexed by <code>(failure cause, attempt number)</code>.
+      It is total — every cell is filled — so the lookup cannot fall through to a default, and every
+      decision records the exact cell it came from.
+    </p>
+    <div class="panel">
+      <div class="panel-head"><h3>Policy table</h3><span class="muted" id="policy-note"></span></div>
+      <div style="overflow-x:auto"><table class="matrix" id="policy"></table></div>
+      <div class="legend" id="policy-legend"></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h3>Diagnosis rules</h3><span class="muted">Rules first; the model sees only what they miss.</span></div>
+      <table class="grid" id="rules">
+        <thead><tr><th>Rule</th><th>Resolves to</th><th class="num">Matched</th><th>Patterns</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- --------------------------------------------------------------- model -->
+  <section id="model">
+    <div class="sec-head"><h2>Where the model is</h2><span class="q">And, more importantly, where it is not.</span></div>
+    <div class="panel"><div id="boundary"></div></div>
+  </section>
+
+  <!-- ----------------------------------------------------------- breakdown -->
+  <section id="breakdown">
+    <div class="sec-head"><h2>By failure cause</h2><span class="q">Not every failure is equally recoverable.</span></div>
+    <div class="panel">
+      <table id="categories" class="grid">
+        <thead>
+          <tr>
+            <th>Cause</th><th class="num">Cases</th><th class="num">Recovered</th>
+            <th class="num">Rate</th><th class="num">₹ recovered</th>
+            <th class="num">Stopped</th><th class="bar-col">Recovery rate</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- --------------------------------------------------------------- cases -->
+  <section id="cases">
+    <div class="sec-head"><h2>Cases</h2><span class="q">Every row opens the full case file.</span></div>
+    <p class="sec-note">
+      A stopped case is a deliverable, not a failure: the case file below is the artifact a human picks up.
+    </p>
+    <div class="panel">
+      <div class="panel-head">
+        <div class="filters">
+          <label>Status <select id="f-status"><option value="">all</option></select></label>
+          <label>Cause <select id="f-category"><option value="">all</option></select></label>
+          <label>Arm <select id="f-arm">
+            <option value="">all</option><option value="treated">treated</option><option value="control">control</option>
+          </select></label>
+          <input id="f-text" type="search" placeholder="search id or subscription…">
+        </div>
         <span id="case-count" class="muted"></span>
       </div>
+      <table id="cases-table" class="grid clickable">
+        <thead>
+          <tr>
+            <th>Case</th><th>Subscription</th><th>Cause</th><th class="num">Amount</th>
+            <th>Attempts</th><th>Status</th><th>Arm</th><th>Data</th><th>Updated</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
     </div>
-    <table id="cases" class="grid clickable">
-      <thead>
-        <tr>
-          <th>Case</th><th>Subscription</th><th>Category</th><th class="num">Amount</th>
-          <th class="num">Attempts</th><th>Status</th><th>Data</th><th>Updated</th>
-        </tr>
-      </thead>
-      <tbody></tbody>
-    </table>
-  </section>
-
-  <section id="detail" class="panel hidden">
-    <div class="panel-head">
-      <h2>Case file <span id="detail-id" class="mono"></span></h2>
-      <button id="close-detail" type="button">Close</button>
-    </div>
-    <div id="detail-body"></div>
   </section>
 </main>
 
 <footer>
-  <span>Every number on this page is a SQL query over <code>recovery.db</code> — no cached
-  aggregates. Trace one with <code>/api/metrics/trace/recovered</code>.</span>
+  Every number on this page is a SQL query over <code>recovery.db</code> — no cached aggregates, no
+  precomputed metric rows. Trace one with <code>GET /api/metrics/trace/recovered</code>, which returns
+  the exact case ids behind it. The guardrails and policy table are served from
+  <code>GET /api/mechanism</code>, straight out of the running configuration.
 </footer>
+
+<div class="drawer-back" id="drawer-back"></div>
+<aside class="drawer" id="drawer" aria-label="Case file">
+  <div class="drawer-head">
+    <div>
+      <h2>Case file <span id="detail-id" class="mono muted"></span></h2>
+    </div>
+    <button id="close-detail" type="button">Close</button>
+  </div>
+  <div class="drawer-body" id="detail-body"></div>
+</aside>
 
 <script src="app.js"></script>
 </body>

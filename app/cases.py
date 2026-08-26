@@ -32,6 +32,7 @@ def create(
     currency: str = "INR",
     opted_out: bool = False,
     synthetic: bool = False,
+    holdout: bool = False,
 ) -> dict[str, Any]:
     now = clock.now_iso()
     case_id = db.new_id("case")
@@ -52,6 +53,7 @@ def create(
             "updated_at": now,
             "closed_at": None,
             "synthetic": 1 if synthetic else 0,
+            "is_holdout": 1 if holdout else 0,
         },
     )
     return get(case_id)

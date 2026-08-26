@@ -109,6 +109,9 @@ def extract(payload: dict[str, Any]) -> dict[str, Any]:
         "case_id_hint": notes.get("case_id"),
         "opted_out": bool(payload.get("customer_opted_out")),
         "synthetic": bool(payload.get("synthetic")),
+        # Arm assignment travels with the event, so it is decided once — by whoever
+        # generated the batch — and never re-rolled inside the pipeline.
+        "holdout": bool(payload.get("holdout")),
     }
 
 
@@ -164,6 +167,7 @@ def intake(payload: dict[str, Any], source: str = "webhook",
             currency=f["currency"],
             opted_out=f["opted_out"] or customer_opted_out(f["customer_id"]),
             synthetic=synthetic,
+            holdout=f["holdout"],
         )
         opened = True
     elif f["opted_out"] and not int(case["customer_opted_out"]):

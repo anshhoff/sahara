@@ -55,6 +55,36 @@ def decide(case: dict[str, Any]) -> Optional[dict[str, Any]]:
         )
         return None
 
+    if int(case.get("is_holdout") or 0) == 1:
+        # The control arm. Detected and diagnosed like any other case — the category on
+        # its file is real — but no intervention is ever chosen, so the treated arm has
+        # something to be measured against.
+        #
+        # The case stays OPEN rather than closing here, because that is what a holdout
+        # is: a case you watch without touching. It can still recover on its own, and
+        # that self-recovery is exactly the quantity being measured. Whatever is left
+        # unrecovered when the episode window expires closes as `stopped_holdout`
+        # (executor._close_expired_episodes).
+        #
+        # This sits *after* the invariant gate on purpose: a holdout case that opt-out
+        # or an unknown cause would have stopped is recorded under that reason, because
+        # the same stop would have happened in the treated arm. Keeping the reasons
+        # intact is what keeps the arms comparable.
+        category = case["current_category"] or "unknown"
+        action, delay_hours = lookup(category, int(case["attempt_count"]) + 1)
+        audit.audit(
+            case["id"], "decide", "system",
+            f"Control arm: no intervention. Policy row {category}/"
+            f"{int(case['attempt_count']) + 1} would have chosen {action}.",
+            {
+                "arm": "control",
+                "policy_row_ref": f"{category}/{int(case['attempt_count']) + 1}",
+                "withheld_action": action,
+                "withheld_delay_hours": delay_hours,
+            },
+        )
+        return None
+
     superseded = _supersede_scheduled(case["id"])
     category = case["current_category"] or "unknown"
     attempt = int(case["attempt_count"]) + 1

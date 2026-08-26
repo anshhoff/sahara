@@ -16,7 +16,8 @@ CREATE TABLE IF NOT EXISTS recovery_case (
   amount_at_risk_paise INTEGER NOT NULL CHECK (amount_at_risk_paise >= 0),
   currency TEXT NOT NULL DEFAULT 'INR',
   status TEXT NOT NULL CHECK (status IN ('open','recovered','stopped_max_attempts',
-    'stopped_cooldown_expired','stopped_opt_out','stopped_unknown','stopped_handoff')),
+    'stopped_cooldown_expired','stopped_opt_out','stopped_unknown','stopped_handoff',
+    'stopped_holdout')),
   attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count BETWEEN 0 AND 3),
   last_contact_at TEXT,
   current_category TEXT CHECK (current_category IN ('card_expired','insufficient_funds',
@@ -25,7 +26,11 @@ CREATE TABLE IF NOT EXISTS recovery_case (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   closed_at TEXT,
-  synthetic INTEGER NOT NULL DEFAULT 0 CHECK (synthetic IN (0,1))
+  synthetic INTEGER NOT NULL DEFAULT 0 CHECK (synthetic IN (0,1)),
+  -- Randomised control arm. A holdout case is detected and diagnosed exactly like any
+  -- other, then stopped before a single intervention, so recovery can be reported as
+  -- INCREMENTAL (treated minus control) rather than gross.
+  is_holdout INTEGER NOT NULL DEFAULT 0 CHECK (is_holdout IN (0,1))
 );
 
 -- ---------------------------------------------------------------- FailureEvent

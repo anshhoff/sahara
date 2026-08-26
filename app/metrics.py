@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+import random
+
 from app import clock, config, db
 
 Traced = tuple[Any, list[str]]
@@ -210,6 +212,99 @@ def reconciliation() -> dict[str, Any]:
 
 
 # ------------------------------------------------------------------- summary
+def _arm(holdout: int) -> list[dict[str, Any]]:
+    return db.rows_to_dicts(db.query(
+        "SELECT id, status, amount_at_risk_paise FROM recovery_case"
+        " WHERE is_holdout = ? ORDER BY created_at", (holdout,)))
+
+
+def incremental_recovery(bootstrap: int = 10000, seed: int = 42) -> dict[str, Any]:
+    """Recovery attributable to the agent, not merely observed alongside it.
+
+    Gross recovery answers "how much came back?". It cannot answer "how much came back
+    *because of us?*" — some failed charges recover on their own when the customer tops
+    up or the issuer stops declining. Without a control arm those rupees are silently
+    credited to the agent.
+
+    So a randomised subset of cases is held out: detected, diagnosed, then never
+    intervened on. The difference in recovery rate between the arms is the agent's
+    effect; everything else is what would have happened anyway.
+
+    Two properties worth stating plainly:
+
+    * **Intention-to-treat.** Every case counts in the arm it was assigned to, whatever
+      status it reached. A treated case stopped by an invariant stays in the treated
+      arm — dropping the ones the agent refused to act on would flatter the result by
+      exactly the cases it handled most conservatively.
+    * **The interval is sampling uncertainty only.** It quantifies how much of the gap
+      could be chance given this many cases. It says nothing about whether the
+      underlying outcome model is right; on a synthetic batch that model is an
+      assumption, so this is a measurement of the *mechanism*, not of the market.
+
+    Returns rates in [0, 1] and money in paise, with a percentile bootstrap CI over
+    cases. Deterministic for a given seed.
+    """
+    treated, control = _arm(0), _arm(1)
+    if not control:
+        return {"available": False,
+                "reason": "no control arm in this batch — run with --holdout to create one"}
+
+    def rate(rows: list[dict[str, Any]]) -> float:
+        return sum(1 for r in rows if r["status"] == "recovered") / len(rows) if rows else 0.0
+
+    def money_per_case(rows: list[dict[str, Any]]) -> float:
+        """Recovered rupees divided by cases *assigned* to the arm — not by cases that
+        recovered. Per-assigned-case is what makes the two arms subtractable, and it
+        keeps the money figure bounded by gross: the control arm can only ever reduce
+        what the agent is credited with."""
+        if not rows:
+            return 0.0
+        return sum(int(r["amount_at_risk_paise"]) for r in rows if r["status"] == "recovered") / len(rows)
+
+    t_rate, c_rate = rate(treated), rate(control)
+    lift = t_rate - c_rate
+    money_lift = money_per_case(treated) - money_per_case(control)
+
+    # One resample drives both statistics, so the rate interval and the money interval
+    # describe the same simulated batches rather than two unrelated ones.
+    rng = random.Random(seed)
+    rate_diffs: list[float] = []
+    money_diffs: list[float] = []
+    for _ in range(bootstrap):
+        rt = [treated[rng.randrange(len(treated))] for _ in range(len(treated))]
+        rc = [control[rng.randrange(len(control))] for _ in range(len(control))]
+        rate_diffs.append(rate(rt) - rate(rc))
+        money_diffs.append(money_per_case(rt) - money_per_case(rc))
+
+    def ci(xs: list[float]) -> tuple[float, float]:
+        xs = sorted(xs)
+        return xs[int(0.025 * len(xs))], xs[min(int(0.975 * len(xs)), len(xs) - 1)]
+
+    lo, hi = ci(rate_diffs)
+    m_lo, m_hi = ci(money_diffs)
+    gross = sum(int(r["amount_at_risk_paise"]) for r in treated if r["status"] == "recovered")
+
+    return {
+        "available": True,
+        "treated": {"n": len(treated), "recovered": sum(1 for r in treated if r["status"] == "recovered"),
+                    "rate": round(t_rate, 4)},
+        "control": {"n": len(control), "recovered": sum(1 for r in control if r["status"] == "recovered"),
+                    "rate": round(c_rate, 4)},
+        "lift": round(lift, 4),
+        "lift_ci95": [round(lo, 4), round(hi, 4)],
+        # Significant only when the interval excludes zero — i.e. the sign of the
+        # effect is not in doubt at this sample size.
+        "significant": lo > 0 or hi < 0,
+        "incremental_paise_per_treated_case": int(round(money_lift)),
+        "incremental_paise_total": int(round(money_lift * len(treated))),
+        "incremental_paise_ci95": [int(round(m_lo * len(treated))), int(round(m_hi * len(treated)))],
+        "gross_recovered_paise": gross,
+        "bootstrap_samples": bootstrap,
+        "basis": ("outcome probabilities are modelling assumptions, not measured market "
+                  "data; this measures the mechanism, not the market"),
+    }
+
+
 def summary() -> dict[str, Any]:
     at_risk_paise, _ = at_risk()
     recovered_paise, _ = recovered()
@@ -232,6 +327,7 @@ def summary() -> dict[str, Any]:
         "llm": llm_involvement(),
         "execution_modes": execution_modes(),
         "reconciliation": reconciliation(),
+        "incremental": incremental_recovery(),
         "bounds": {
             "max_attempts": config.MAX_ATTEMPTS,
             "cooldown_hours": config.COOLDOWN_HOURS,

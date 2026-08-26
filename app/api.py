@@ -12,7 +12,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
-from app import audit, cases, config, db, metrics
+from app import audit, cases, config, db, invariants, metrics
 
 router = APIRouter(prefix="/api", tags=["dashboard"])
 
@@ -47,10 +47,115 @@ def categories() -> list[dict[str, Any]]:
     return metrics.by_category()
 
 
+# Plain-English gloss for each invariant. Kept next to the machine-readable rule text
+# in invariants.INVARIANT_TEXT rather than in the dashboard, so the words a judge reads
+# and the rule the code enforces cannot drift apart.
+_INVARIANT_PLAIN = {
+    "I1": ("Never more than a few tries",
+           "After the cap, the case stops for good and goes to a human. There is no "
+           "path — not a policy change, not a model output — that buys a fourth attempt."),
+    "I2": ("Never two messages in a row",
+           "A customer who was just contacted cannot be contacted again until the "
+           "cooldown has passed. A due intervention waits; it does not fire early."),
+    "I3": ("Opt-out beats everything",
+           "Once someone opts out, nothing is sent and nothing is charged — checked "
+           "again immediately before execution, so an opt-out that lands after the "
+           "decision still stops it."),
+    "I4": ("Never guess a cause",
+           "If the failure reason is unknown — or the model was unsure, unavailable, or "
+           "malformed — the case stops untouched rather than being acted on blindly."),
+}
+
+
+@router.get("/mechanism")
+def mechanism() -> dict[str, Any]:
+    """What the agent is, as data: the policy table it chooses from, the guardrails it
+    cannot cross, and how many times each one actually fired in this batch.
+
+    The dashboard renders this instead of hardcoding a copy of the rules. A gate that
+    is described in one place and enforced in another eventually describes something
+    the code no longer does.
+    """
+    stops = metrics.stopped_by_status()
+    stop_for = {
+        "I1": stops.get("stopped_max_attempts", 0),
+        "I2": stops.get("stopped_cooldown_expired", 0),
+        "I3": stops.get("stopped_opt_out", 0),
+        "I4": stops.get("stopped_unknown", 0),
+    }
+    defers = int(db.scalar(
+        "SELECT COUNT(*) FROM audit_log WHERE stage = 'decide' AND summary LIKE '%deferred by I2%'", (), 0))
+
+    invariants_out = []
+    for code in ("I1", "I2", "I3", "I4"):
+        title, plain = _INVARIANT_PLAIN[code]
+        invariants_out.append({
+            "code": code,
+            "title": title,
+            "rule": invariants.INVARIANT_TEXT[code],
+            "plain": plain,
+            "stops": stop_for[code],
+            "defers": defers if code == "I2" else 0,
+        })
+
+    policy = [
+        {"category": cat, "attempt": att,
+         "action": config.POLICY[(cat, att)][0], "delay_hours": config.POLICY[(cat, att)][1]}
+        for cat in config.CATEGORIES
+        for att in range(1, config.MAX_ATTEMPTS + 1)
+    ]
+
+    rules = [
+        {"id": rid, "category": cat, "patterns": list(pats)[:6], "n_patterns": len(pats),
+         "n_matched": int(db.scalar(
+             "SELECT COUNT(*) FROM diagnosis_result WHERE matched_rule = ?", (rid,), 0))}
+        for rid, pats, cat in config.RULES
+    ]
+    rules.append({
+        "id": config.RULE_R7, "category": "unknown", "patterns": [], "n_patterns": 0,
+        "n_matched": int(db.scalar(
+            "SELECT COUNT(*) FROM diagnosis_result WHERE matched_rule = ?", (config.RULE_R7,), 0)),
+    })
+
+    return {
+        "funnel": {
+            "events": int(db.scalar("SELECT COUNT(*) FROM failure_event", (), 0)),
+            "cases": int(db.scalar("SELECT COUNT(*) FROM recovery_case", (), 0)),
+            "diagnoses": int(db.scalar("SELECT COUNT(*) FROM diagnosis_result", (), 0)),
+            "decisions": int(db.scalar("SELECT COUNT(*) FROM intervention_decision", (), 0)),
+            "blocked": int(db.scalar(
+                "SELECT COUNT(*) FROM intervention_decision WHERE status = 'blocked_by_invariant'", (), 0)),
+            "executions": int(db.scalar("SELECT COUNT(*) FROM execution_record", (), 0)),
+            "contacts": int(db.scalar(
+                "SELECT COUNT(*) FROM execution_record WHERE action IN"
+                " ('SEND_UPDATE_LINK','PROMISE_TO_PAY')", (), 0)),
+            "recovered": int(db.scalar(
+                "SELECT COUNT(*) FROM recovery_case WHERE status = 'recovered'", (), 0)),
+        },
+        "invariants": invariants_out,
+        "policy": policy,
+        "rules": rules,
+        "categories": list(config.CATEGORIES),
+        "actions": sorted({p["action"] for p in policy}),
+        "copy": {
+            "slots": list(config.COPY_SLOTS),
+            "max_chars": config.COPY_MAX_CHARS,
+            "forbidden": list(config.COPY_FORBIDDEN),
+            "disclosure": config.SYNTHETIC_DISCLOSURE,
+        },
+        "bounds": {
+            "max_attempts": config.MAX_ATTEMPTS,
+            "cooldown_hours": config.COOLDOWN_HOURS,
+            "episode_window_days": config.EPISODE_WINDOW_DAYS,
+            "promise_window_hours": config.PROMISE_WINDOW_HOURS,
+        },
+    }
+
+
 @router.get("/cases")
 def list_cases(status: Optional[str] = Query(None), category: Optional[str] = Query(None)) -> list[dict[str, Any]]:
     sql = ("SELECT id AS case_id, current_category AS category, amount_at_risk_paise, attempt_count,"
-           " status, synthetic, customer_opted_out, subscription_id, created_at, updated_at, closed_at"
+           " status, synthetic, is_holdout, customer_opted_out, subscription_id, created_at, updated_at, closed_at"
            " FROM recovery_case WHERE 1 = 1")
     params: list[Any] = []
     if status:

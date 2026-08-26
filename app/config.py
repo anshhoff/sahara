@@ -59,6 +59,9 @@ CASE_STATUSES = (
     "stopped_opt_out",
     "stopped_unknown",
     "stopped_handoff",
+    # A control-arm case: deliberately never intervened on, so the treated arm has
+    # something to be measured against. Not a failure and not a safety stop.
+    "stopped_holdout",
 )
 TERMINAL_STATUSES = tuple(s for s in CASE_STATUSES if s != "open")
 STOPPED_STATUSES = tuple(s for s in CASE_STATUSES if s.startswith("stopped_"))
