@@ -52,18 +52,44 @@ async function get(path) {
   return res.json();
 }
 
-/* ====================================================== header + banner === */
+/* =============================================================== routing === */
+const VIEWS = {
+  overview:   ["Overview", "What is at stake, and what came back."],
+  impact:     ["Impact", "Money recovered because of the agent — not merely alongside it."],
+  causes:     ["By failure cause", "Where recovery is easy, and where it is not."],
+  pipeline:   ["Pipeline", "What actually happened to the events that arrived."],
+  guardrails: ["Guardrails", "The part of the system that says no."],
+  policy:     ["Decision policy", "A lookup, not a judgement call."],
+  model:      ["Model boundary", "What the model decides, and what it never touches."],
+  cases:      ["Cases", "Every row opens the full case file."],
+};
+
+function route() {
+  const name = (location.hash.replace(/^#\//, "") || "overview");
+  const view = VIEWS[name] ? name : "overview";
+  $$(".view").forEach((v) => v.classList.toggle("active", v.dataset.view === view));
+  $$("#nav a").forEach((a) => a.classList.toggle("active", a.dataset.view === view));
+  $("#view-title").textContent = VIEWS[view][0];
+  $("#view-q").textContent = VIEWS[view][1];
+  const sc = $("#scroll"); if (sc) sc.scrollTop = 0;
+}
+
+/* ====================================================== rail + banner === */
 function renderChips(s) {
   const b = s.bounds;
   const chips = [
     ["", `max ${b.max_attempts} attempts`],
-    ["", `${b.cooldown_hours}h contact cooldown`],
-    ["", `${b.episode_window_days}d episode window`],
-    [b.llm_model ? "on" : "off",
-      b.llm_model ? `model ${b.llm_model}` : `no model (LLM_PROVIDER=${b.llm_provider})`],
-    ["", `confidence ≥ ${b.llm_confidence_threshold}`],
+    ["", `${b.cooldown_hours}h cooldown`],
+    ["", `${b.episode_window_days}d window`],
+    [b.llm_model ? "on" : "off", b.llm_model ? `model ${b.llm_model}` : "no model"],
   ];
   setHTML("#chips", chips.map(([cls, t]) => html`<span class="chip ${cls}">${t}</span>`));
+  setHTML("#rail-note", html`Bounds are hardcoded, not configurable at runtime.
+    Seed ${s.seed ?? "—"} · ${s.n_synthetic} synthetic · ${s.n_live} live test-mode.`);
+
+  const inc = s.incremental || {};
+  $("#nav-impact").textContent = inc.available ? pp(inc.lift, 0) : "—";
+  $("#nav-cases").textContent = s.n_cases;
 }
 
 function renderBanner(s) {
@@ -104,6 +130,52 @@ function renderTiles(s) {
       <div class="value">${value}</div>
       <div class="sub">${sub}</div>
     </div>`));
+}
+
+/* ------------------------------------------------ overview: outcome split -- */
+function renderOutcomeSplit(s) {
+  const by = s.stopped.by_status || {};
+  const holdout = by.stopped_holdout || 0;
+  const stoppedOther = s.stopped.total - holdout;
+  const parts = [
+    ["s-recovered", "Recovered", s.n_recovered, "money confirmed back"],
+    ["s-stopped", "Stopped & handed off", stoppedOther, "each with a complete case file"],
+    ["s-holdout", "Control arm", holdout, "deliberately never touched"],
+    ["s-open", "Still open", s.n_open, "inside the episode window"],
+  ].filter(([, , n]) => n > 0);
+  const total = parts.reduce((a, [, , n]) => a + n, 0) || 1;
+
+  setHTML("#outcome-split", html`
+    <div class="split">${parts.map(([cls, , n]) =>
+      html`<span class="${cls}" style="${width(n / total)}"></span>`)}</div>
+    <div class="split-key">${parts.map(([cls, label, n, note]) => html`
+      <div><i class="${cls}" style="background:${
+        cls === "s-recovered" ? "#0a7146" : cls === "s-stopped" ? "#d9a03c"
+        : cls === "s-holdout" ? "#475569" : "#e3e6eb"}"></i>
+        <span>${label} <span class="muted">— ${note}</span></span>
+        <span class="k-n">${n}</span></div>`)}</div>`);
+}
+
+function renderEffectMini(s) {
+  const inc = s.incremental || {};
+  if (!inc.available) {
+    setHTML("#effect-mini", html`<div class="empty">
+      No control arm in this batch, so every rupee shown is <b>gross</b> — it cannot be separated from
+      what would have come back anyway. Re-run with <code>--holdout 0.3</code> to measure the difference.
+    </div>`);
+    return;
+  }
+  const [lo, hi] = inc.lift_ci95;
+  setHTML("#effect-mini", html`
+    <div class="lift-box ${inc.significant ? "" : "null"}" style="margin-top:0">
+      <div class="lift-big">${pp(inc.lift)}</div>
+      <div class="lift-sub">recovery-rate lift over the untreated control arm,
+        95% CI [${pp(lo)}, ${pp(hi)}]</div>
+      <div class="lift-sub" style="margin-top:7px">
+        <b>${fmtRupees(inc.incremental_paise_total)}</b> incremental of
+        <b>${fmtRupees(inc.gross_recovered_paise)}</b> gross
+      </div>
+    </div>`);
 }
 
 /* ================================================== did it work (effect) === */
@@ -183,6 +255,8 @@ function renderFlow(m) {
 
 /* =========================================================== guardrails === */
 function renderGuards(m) {
+  const fired = m.invariants.reduce((n, i) => n + i.stops + i.defers, 0);
+  $("#nav-guards").textContent = fired ? String(fired) : "";
   setHTML("#guards", m.invariants.map((i) => {
     const bits = [];
     if (i.stops) bits.push(html`stopped <b>${i.stops}</b> case${i.stops === 1 ? "" : "s"}`);
@@ -454,6 +528,8 @@ async function load() {
   renderChips(summary);
   renderBanner(summary);
   renderTiles(summary);
+  renderOutcomeSplit(summary);
+  renderEffectMini(summary);
   renderEffect(summary);
   renderFlow(mechanism);
   renderGuards(mechanism);
@@ -464,22 +540,13 @@ async function load() {
   renderCases();
 }
 
-/* section nav highlighting — plain scroll math, no observer library */
-function syncNav() {
-  const y = window.scrollY + 150;
-  let current = null;
-  $$("main section").forEach((s) => { if (s.offsetTop <= y) current = s.id; });
-  $$("nav.sections a").forEach((a) =>
-    a.classList.toggle("active", a.getAttribute("href") === "#" + current));
-}
-
 $("#refresh").addEventListener("click", load);
 $("#close-detail").addEventListener("click", closeCase);
 $("#drawer-back").addEventListener("click", closeCase);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeCase(); });
 ["#f-status", "#f-category", "#f-arm"].forEach((s) => $(s).addEventListener("change", renderCases));
 $("#f-text").addEventListener("input", renderCases);
-window.addEventListener("scroll", syncNav, { passive: true });
+window.addEventListener("hashchange", route);
 
 $("#expand").addEventListener("click", () => {
   const anyClosed = $$("details").some((d) => !d.open);
@@ -487,7 +554,8 @@ $("#expand").addEventListener("click", () => {
   $("#expand").textContent = anyClosed ? "Collapse all detail" : "Expand all detail";
 });
 
-load().then(syncNav).catch((err) => {
+route();
+load().catch((err) => {
   setHTML("#tiles", html`<div class="tile" style="grid-column:1/-1">
     <div class="label">Dashboard could not load</div>
     <div class="sub">${err.message} — is the API running, and has the batch been run?</div></div>`);

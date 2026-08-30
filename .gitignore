@@ -11,3 +11,4 @@ synthetic_cases.json
 .claude/
 *.db-shm
 *.db-wal
+graphify-out/

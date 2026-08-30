@@ -110,7 +110,8 @@ curl, through Razorpay's own CLI, and through the dashboard UI (which shows "Som
 went wrong" on both read and write). With no plan there is no subscription, hence no
 "Charge this now", hence no Razorpay-originated webhook. Everything from signature
 verification inward is the production path; the unproven span is the tunnel, not the
-logic. Full record: `docs/notes-test-cards.md`.
+logic. Resolution is a Razorpay support request to enable Subscriptions in test mode,
+not a code change.
 
 ## Where the LLM is — and is not
 
@@ -156,7 +157,7 @@ audited and bounded.
 ## Architecture
 
 One FastAPI process serves the webhook receiver, the JSON API and the static
-dashboard. One SQLite file holds six tables. There is no job queue: `RETRY_LATER`
+dashboard. One SQLite file holds seven tables. There is no job queue: `RETRY_LATER`
 decisions write a `scheduled_for` timestamp, and a `tick()` scan executes what is due —
 every 30 s in live mode, and directly against a **simulated clock** in batch mode, so a
 14-day recovery episode resolves in milliseconds through the same code path.
@@ -177,18 +178,18 @@ app/
   audit.py       append-only audit writer
   metrics.py     every metric as (value, case_ids)
   api.py         dashboard JSON endpoints
-schema.sql       six tables, with CHECK constraints as the enum backstop
+schema.sql       seven tables, with CHECK constraints as the enum backstop
 scripts/         generate_synthetic.py, run_batch.py, check_llm.py
 dashboard/       static HTML + vanilla JS + one CSS file, no build step
-tests/           80 tests: rules, policy matrix, invariants, copy validator, boundary, API
+tests/           98 tests: rules, policy matrix, invariants, copy validator, boundary, API
 ```
 
-`cases.py` is a ninth module beyond the eight named in `docs/01` §3; it exists only to
+`cases.py` is a ninth module beyond the eight core loop modules; it exists only to
 hold `transition()` without creating an import cycle between `db.py` and `audit.py`.
 
 ## Setup
 
-Python 3.11+ is the documented target (`docs/10` §1). This build was written and
+Python 3.11+ is the nominal target. This build was written and
 verified on Python 3.9.6; nothing in it needs a newer runtime.
 
 ```bash
@@ -212,10 +213,10 @@ pytest -q
 
 | Variable | Required for | Where it comes from |
 |---|---|---|
-| `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` | Real test-mode API calls (Payment Links) | Dashboard → API Keys, test mode (`docs/02` §2) |
-| `RAZORPAY_WEBHOOK_SECRET` | Webhook signature verification | You choose it when creating the webhook (`docs/02` §6) |
-| `LLM_PROVIDER` | `openai_compat` (hosted free tier) / `ollama` (local) / `none` | `docs/10` §5 |
-| `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | Whichever provider you picked | `docs/10` §5.2–5.3 |
+| `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` | Real test-mode API calls (Payment Links) | Razorpay Dashboard in **test mode** → Account & Settings → API Keys → Generate Test Key. The secret is shown once. |
+| `RAZORPAY_WEBHOOK_SECRET` | Webhook signature verification | A long random string you choose when creating the webhook — see "Live mode" below |
+| `LLM_PROVIDER` | `openai_compat` (hosted free tier) / `ollama` (local) / `none` | See "The three LLM modes" below |
+| `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | Whichever provider you picked | Your provider's own API-keys and model-list pages |
 | `DB_PATH` | Pointing at a scratch database | optional, defaults to `recovery.db` |
 | `LLM_COPY_ENABLED` | Kill-switch forcing static templates | optional, defaults to `true` |
 | `LIVE_LINKS_MAX` | Cap on real test-mode Payment Links | optional, defaults to `5` |
@@ -236,7 +237,7 @@ knows a model exists.
 | `none` | No model at all: ambiguous cases become `unknown` and stop, copy uses static templates | nothing | ₹0, no setup |
 
 **On a laptop that cannot spare the RAM for a local model, use `openai_compat`** — that
-is exactly what `docs/10` §5.3 is for. Copy `.env.example` to `.env`, uncomment your
+is exactly what it is for. Copy `.env.example` to `.env`, uncomment your
 provider, and paste a **current** model id from that provider's own model page: model
 ids and free-tier limits change often, so do not take one from any documentation,
 including these docs.
@@ -260,21 +261,41 @@ it is the proof that the guardrails do not depend on model quality.
 **Coding agents are not providers.** opencode, Claude Code, Cursor and Aider are
 terminal/IDE agents that help you *write* this project; they are not inference
 endpoints the app can call, they each still need a model provider behind them, and they
-must never appear in `requirements.txt` (`docs/10` §5.4, §9).
+must never appear in `requirements.txt`.
 
 ### Live mode (Razorpay test mode + ngrok)
 
-Follow `docs/02-razorpay-setup.md` end to end: test keys, plan `demo-monthly-499`, one
-authenticated subscription, a webhook pointed at
-`https://<your-ngrok>.ngrok-free.app/webhooks/razorpay` subscribed to `payment.failed`,
-`subscription.pending`, `subscription.halted`, `subscription.charged` and
-`payment_link.paid`. Then force a charge failure and watch it traverse the same loop
-the batch runs. Real Payment Links are created with SMS and email notifications
-explicitly disabled — Razorpay never contacts anyone in this project.
+1. **Keys** — test-mode dashboard → Account & Settings → API Keys → Generate Test Key.
+   Put `RAZORPAY_KEY_ID` and `RAZORPAY_KEY_SECRET` in `.env`.
+2. **Plan and subscription** — Subscriptions → Plans → Create Plan (`demo-monthly-499`,
+   monthly, ₹499 = `49900` paise; every amount in this project is a paise integer). Create
+   a subscription on it, then authenticate it by paying its short URL with a success test
+   card. Take card numbers from Razorpay's own
+   [test-card page](https://razorpay.com/docs/payments/payments/test-card-details/) at the
+   time you test — never from documentation, including this README.
+3. **Webhook** — run `uvicorn app.main:app --port 8000`, then `ngrok http 8000`. Point a
+   webhook at `https://<your-ngrok>.ngrok-free.app/webhooks/razorpay`, give it a long
+   random secret (that is `RAZORPAY_WEBHOOK_SECRET`), and subscribe it to `payment.failed`,
+   `subscription.pending`, `subscription.halted`, `subscription.charged` and
+   `payment_link.paid`. The last two are the **recovery** signals the outcome handler needs.
+   The free-tier ngrok URL changes on every restart — update the webhook each time, or keep
+   one session alive.
+4. **Force a failure** — open the active subscription and use test mode's "Charge this now"
+   against a failure card, then watch it traverse the same loop the batch runs. Razorpay's
+   failed-charge signal for subscriptions is the `subscription.pending` transition; there is
+   no literal `subscription.charged.failed` event.
+
+Signature verification uses `razorpay.Utility.verify_webhook_signature` over the **raw**
+request body — HMAC-SHA256, never re-serialized JSON. Delivery is deduped on the event id,
+because Razorpay retries on any non-2xx and may deliver duplicates.
+
+Real Payment Links are created with SMS, email and WhatsApp notifications explicitly
+disabled, and reminders off — Razorpay never contacts anyone in this project.
 
 ## Verifying the numbers
 
-The README, the dashboard and raw SQL must agree to the paisa (`docs/07` §5):
+The README, the dashboard and raw SQL must agree to the paisa — all three below are
+derived from the same rows, so any disagreement is a bug, not a rounding artifact:
 
 ```bash
 curl -s localhost:8000/api/summary | python -m json.tool
@@ -294,9 +315,10 @@ ordering is by insertion (`rowid`), never by a random id tail.
   signed locally, because Subscriptions is not provisioned on the account (`/v1/plans` →
   `401`, reproduced three ways). No plan, so no subscription, so no "Charge this now".
   What is unverified is the tunnel, not the logic. See "The one live case".
-- **No test card has been exercised.** `docs/notes-test-cards.md` records why: the card
-  matrix is reachable only through a subscription authentication flow, which the same
-  `401` blocks. Category breadth comes from the synthetic set, as designed.
+- **No test card has been exercised.** The card matrix is reachable only through a
+  subscription authentication flow, which the same `401` blocks: no plan, no subscription,
+  nothing to authenticate a card against. Category breadth comes from the synthetic set, as
+  designed.
 - **A real model has now been called.** `scripts/check_llm.py` reached a hosted
   OpenAI-compatible provider and classified 4/4 rule-proof probes correctly. The frozen
   88-case batch above was still run with `LLM_PROVIDER=none`, so its `1/4` model-path
@@ -306,20 +328,45 @@ ordering is by insertion (`rowid`), never by a random id tail.
 - `retry_charge` is always recorded as `simulated`: test mode exposes no stable API for
   forcing a subscription charge retry, and inventing a "live" record would be a lie in
   an audit-trail project.
-- Checkout abandonment, B2B receivables, real SMS/email delivery and learned retry
-  timing are out of scope by choice — see `docs/00-overview.md` §2.2 for why, and what
-  reuse would look like. Each is a new detector and policy table over the same
-  Diagnose→Decide→Execute→Stop skeleton.
+- **Checkout abandonment, B2B receivables, real SMS/email delivery and learned retry
+  timing are out of scope by choice** — one recovery thread done completely beats four done
+  shallowly. Each is a new detector and policy table over the same
+  Diagnose→Decide→Execute→Stop skeleton, which is what makes them credible future work
+  rather than a redesign:
+  - *Checkout abandonment* — a different detection surface (client-side events, no webhook
+    of record) and a different consent posture (pre-purchase marketing contact vs
+    post-purchase service contact). New detector and policy table; same executor,
+    invariants and audit trail.
+  - *B2B receivables* — a different cadence (invoices and dunning ladders over weeks) and an
+    invoice data model. New `FailureEvent` source and longer-horizon policy rows; same
+    stopping rules and metrics.
+  - *Real outbound messaging* — the compliance surface (TRAI DLT registration, DND, consent
+    records) is a project in itself. Swap the simulated-notification executor for a real
+    provider behind the same `ExecutionRecord` interface.
+  - *Learned retry timing* — a wrong learned policy moves money wrongly. The deterministic
+    policy table is the baseline any learned policy would have to beat.
 - Every simulated message carries the literal `[SYNTHETIC DEMO]` disclosure, and the
   copy validator rejects any draft without it. Nothing is ever transmitted anywhere.
 
 ## Documentation
 
-`docs/00-overview.md` through `docs/10-tech-stack.md` are the specification this
-implementation follows. `docs/11-setup-and-usage.md` is the operator's guide — install,
-configure, run, use the dashboard and API, and troubleshoot, in more detail than the
-Setup section above. `docs/future-work-notes.md` records everything wished for after the
-freeze.
+This README is the operator's guide — setup, the three LLM modes, live mode, and how to
+verify every number are all above. Beyond it, the project documents itself in the places
+that cannot drift away from the code:
+
+- **`tests/`** — 98 tests are the executable specification. `test_policy_matrix.py`
+  iterates all 6×3 cells of the decision table; `test_invariants.py` drives a case to the
+  attempt cap and asserts I1 fires; `test_copy_validation.py` is the copy validator's
+  contract, rule by rule; `test_llm_boundary.py` pins the model's blast radius.
+- **`schema.sql`** — seven tables, with `CHECK` constraints as the enum backstop.
+- **`app/config.py`** — the bounds, the rule table, the policy table and the copy
+  templates, in one readable file.
+- **`tests/fixtures/README.md`** — what each captured payload is, and the category it
+  should diagnose as.
+
+The design specification this implementation follows was written before the build and is
+deliberately not published here: it records intent, and wherever intent and code disagree,
+the code and its tests are the answer.
 
 ## License
 
