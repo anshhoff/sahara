@@ -432,19 +432,21 @@ def execute_decision(decision: dict[str, Any]) -> Optional[dict[str, Any]]:
 
 
 # -------------------------------------------------------------------- the tick
-def due_decisions(now_iso: Optional[str] = None) -> list[dict[str, Any]]:
+def due_decisions(now_iso: Optional[str] = None, include_synthetic: bool = True) -> list[dict[str, Any]]:
     return db.rows_to_dicts(
         db.query(
-            "SELECT * FROM intervention_decision WHERE status = 'scheduled' AND scheduled_for <= ?"
+            "SELECT d.* FROM intervention_decision d"
+            " WHERE d.status = 'scheduled' AND d.scheduled_for <= ?"
+            + ("" if include_synthetic else " AND d.synthetic = 0")
             # rowid, not id: ULIDs carry a random tail, so ties on scheduled_for would
             # order arbitrarily and make a seeded batch non-reproducible.
-            " ORDER BY scheduled_for ASC, decided_at ASC, rowid ASC",
+            + " ORDER BY d.scheduled_for ASC, d.decided_at ASC, d.rowid ASC",
             (now_iso or clock.now_iso(),),
         )
     )
 
 
-def _close_lapsed_promises() -> int:
+def _close_lapsed_promises(include_synthetic: bool = True) -> int:
     """A promise-to-pay that was not honoured inside its window goes to the human
     queue — it is never retried, because attempt 3 was the last one."""
     closed = 0
@@ -452,6 +454,7 @@ def _close_lapsed_promises() -> int:
         "SELECT e.case_id AS case_id, e.executed_at AS executed_at, e.id AS execution_id"
         " FROM execution_record e JOIN recovery_case c ON c.id = e.case_id"
         " WHERE e.action = 'PROMISE_TO_PAY' AND c.status = 'open'"
+        + ("" if include_synthetic else " AND c.synthetic = 0")
     )
     for row in rows:
         deadline = clock.plus_hours(clock.parse_iso(row["executed_at"]), config.PROMISE_WINDOW_HOURS)
@@ -466,11 +469,13 @@ def _close_lapsed_promises() -> int:
     return closed
 
 
-def _close_expired_episodes() -> int:
+def _close_expired_episodes(include_synthetic: bool = True) -> int:
     """No case is left a zombie: an open case that outlives its episode window closes
     honestly rather than waiting for a webhook that may never arrive."""
     closed = 0
-    for row in db.query("SELECT * FROM recovery_case WHERE status = 'open'"):
+    sql = "SELECT * FROM recovery_case WHERE status = 'open'" + (
+        "" if include_synthetic else " AND synthetic = 0")
+    for row in db.query(sql):
         case = db.row_to_dict(row)
         if invariants.episode_expired(case):
             # A control-arm case reaching the end of its window was never intervened
@@ -495,16 +500,25 @@ def _close_expired_episodes() -> int:
     return closed
 
 
-def tick() -> dict[str, Any]:
+def tick(include_synthetic: bool = True) -> dict[str, Any]:
     """Advance every case whose next step is due. Called every 30s in live mode and
-    directly by the batch runner against the simulated clock (docs/01 §2)."""
+    directly by the batch runner against the simulated clock (docs/01 §2).
+
+    `include_synthetic=False` is what the background loop in main.py uses, and it exists
+    because the two clocks share one database. A batch replay writes its cases against a
+    *simulated* clock; to the live loop, running on the wall clock, every one of those
+    cases looks weeks old and therefore expired — so an unfiltered background tick would
+    quietly close a finished experiment and report it as a batch that recovered nothing.
+    Synthetic rows advance only under the clock that created them: the batch runner, or an
+    operator pressing Tick, both of which call this with the default.
+    """
     executions: list[dict[str, Any]] = []
-    for decision in due_decisions():
+    for decision in due_decisions(include_synthetic=include_synthetic):
         record = execute_decision(decision)
         if record is not None:
             executions.append(record)
-    promises = _close_lapsed_promises()
-    expired = _close_expired_episodes()
+    promises = _close_lapsed_promises(include_synthetic)
+    expired = _close_expired_episodes(include_synthetic)
     return {
         "at": clock.now_iso(),
         "executions": executions,

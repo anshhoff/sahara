@@ -10,12 +10,27 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
+import threading
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 from app import audit, cases, clock, config, db, diagnosis, policy
 
 log = logging.getLogger(__name__)
+
+# Serialises the claim region of intake() — the dedupe check, the event insert and the
+# open-case lookup — against itself. In live mode the webhook path and the tick loop
+# genuinely run concurrently (main.py dispatches both through asyncio.to_thread), and
+# Razorpay's at-least-once delivery means the two racing bodies are routinely the same
+# event. Diagnosis and the policy decision are deliberately outside it: those can be
+# slow (a model call) and are safe to run in parallel once the case exists.
+#
+# The lock covers one process. `failure_event.razorpay_event_id UNIQUE` covers the rest:
+# a second process losing the race gets an IntegrityError, which is caught below and
+# answered as a duplicate — a 200, so Razorpay stops redelivering, rather than a 500,
+# which would make it try again.
+_claim_lock = threading.RLock()
 
 
 # ------------------------------------------------------------------- signature
@@ -146,35 +161,52 @@ def intake(payload: dict[str, Any], source: str = "webhook",
 
     # ------------------------------------------------- recovery signals
     if event_type in config.RECOVERY_EVENT_TYPES:
-        case = None
-        if f["case_id_hint"]:
-            case = cases.get(f["case_id_hint"])
-        if case is None:
-            case = cases.find_open_by_subscription(f["subscription_id"])
-        _insert_event(event_id, case, f, source, synthetic, payload, event_type)
-        if case is None or case["status"] != "open":
-            return {"status": "no_open_case", "event_id": event_id, "event_type": event_type}
-        return outcome_recovered(case, f, event_id)
+        with _claim_lock:
+            case = None
+            if f["case_id_hint"]:
+                case = cases.get(f["case_id_hint"])
+            if case is None:
+                case = cases.find_open_by_subscription(f["subscription_id"])
+            try:
+                _insert_event(event_id, case, f, source, synthetic, payload, event_type)
+            except sqlite3.IntegrityError:
+                return {"status": "duplicate", "event_id": event_id}
+            if case is None or case["status"] != "open":
+                return {"status": "no_open_case", "event_id": event_id, "event_type": event_type}
+            return outcome_recovered(case, f, event_id)
 
     # ------------------------------------------------- failure signals
-    case = cases.find_open_by_subscription(f["subscription_id"])
-    opened = False
-    if case is None:
-        case = cases.create(
-            subscription_id=f["subscription_id"],
-            customer_id=f["customer_id"],
-            amount_at_risk_paise=f["amount_paise"],
-            currency=f["currency"],
-            opted_out=f["opted_out"] or customer_opted_out(f["customer_id"]),
-            synthetic=synthetic,
-            holdout=f["holdout"],
-        )
-        opened = True
-    elif f["opted_out"] and not int(case["customer_opted_out"]):
-        cases.set_opted_out(case["id"], True)
-        case = cases.get(case["id"])
+    # The event row is written first, with no case attached, because it is the claim
+    # token: the UNIQUE event id makes the insert itself the dedupe. Opening the case
+    # first would mean a lost race leaves an empty case behind — a second attempt
+    # budget against a customer who only ever failed once.
+    with _claim_lock:
+        try:
+            event = _insert_event(event_id, None, f, source, synthetic, payload, event_type)
+        except sqlite3.IntegrityError:
+            return {"status": "duplicate", "event_id": event_id}
 
-    event = _insert_event(event_id, case, f, source, synthetic, payload, event_type)
+        case = cases.find_open_by_subscription(f["subscription_id"])
+        opened = False
+        if case is None:
+            case = cases.create(
+                subscription_id=f["subscription_id"],
+                customer_id=f["customer_id"],
+                amount_at_risk_paise=f["amount_paise"],
+                currency=f["currency"],
+                opted_out=f["opted_out"] or customer_opted_out(f["customer_id"]),
+                synthetic=synthetic,
+                holdout=f["holdout"],
+            )
+            opened = True
+        elif f["opted_out"] and not int(case["customer_opted_out"]):
+            cases.set_opted_out(case["id"], True)
+            case = cases.get(case["id"])
+
+        # The one write a failure_event ever receives: case_id set once, from NULL,
+        # inside the same claim. Every other column stays immutable after insert.
+        db.update("failure_event", event["id"], {"case_id": case["id"]})
+        event["case_id"] = case["id"]
 
     audit.audit(
         case["id"], "detect", "razorpay" if source == "webhook" else "system",

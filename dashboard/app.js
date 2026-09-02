@@ -1,562 +1,1069 @@
-/* Dashboard client (docs/06). Vanilla fetch, no framework, no build step.
-   A Refresh button re-fetches; there is deliberately no polling and no websocket.
+/* =============================================================================
+   Recovery Agent — operator console
+   -----------------------------------------------------------------------------
+   One file, no build step, no dependencies. Structure:
 
-   The guardrail, policy and rule sections render whatever /api/mechanism returns.
-   Nothing about the agent's rules is written down twice.
+     api / fmt      thin fetch wrapper and formatters
+     state          the last response from each endpoint, nothing derived
+     render*        one function per view, each a pure function of state
+     control room   POST + poll the job endpoints in app/control.py
+     router         hash routing, so every view is a shareable link
 
-   ESCAPING IS STRUCTURAL. Markup is built with the html`` tag below, which escapes
-   every interpolated value unless it is explicitly a Safe fragment. Escaping is
-   therefore the default and safety does not depend on remembering to call esc() at
-   each of a hundred call sites. Data here reaches the page from Razorpay webhook
-   bodies stored verbatim in the database (error strings, ids), so it is treated as
-   untrusted throughout. */
+   Two rules this file follows:
 
-const $ = (sel) => document.querySelector(sel);
-const $$ = (sel) => [...document.querySelectorAll(sel)];
-const state = { cases: [], summary: null, mechanism: null };
+   1. It never restates a rule the backend owns. Policy cells, invariant text,
+      category lists and bounds are all rendered from /api/mechanism. If the console
+      shows a rule, the code enforcing it produced the words.
+   2. Every value that reaches innerHTML goes through esc() first. Case ids,
+      subscription ids and error descriptions arrive from a webhook body — that is
+      attacker-influenced text, and it is rendered escaped, never raw. Subprocess
+      output goes to textContent, never innerHTML.
+============================================================================= */
+"use strict";
 
-/* ------------------------------------------------------------- escaping --- */
-class Safe {                       // an already-escaped fragment
-  constructor(s) { this.s = s; }
-  toString() { return this.s; }
-}
-const raw = (s) => new Safe(s);    // use ONLY on markup this file authored
-const ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
-function esc(v) {
-  if (v instanceof Safe) return v.s;
-  if (Array.isArray(v)) return v.map(esc).join("");
-  if (v === null || v === undefined || v === false) return "";
-  return String(v).replace(/[&<>"']/g, (c) => ESCAPES[c]);
-}
-const html = (strings, ...vals) =>
-  raw(strings.reduce((out, s, i) => out + s + (i < vals.length ? esc(vals[i]) : ""), ""));
-// esc(), not String(): a bare Array.toString() joins with commas, which would
-// sprinkle stray "," between every tile, chip and table row.
-const setHTML = (sel, v) => { $(sel).innerHTML = esc(v); };
-
-/* ------------------------------------------------------------ formatting --- */
-const fmtRupees = (paise) => "₹" + Math.round(paise / 100).toLocaleString("en-IN");
-const pct = (x, d = 1) => (x * 100).toFixed(d) + "%";
-const pp = (x, d = 1) => (x >= 0 ? "+" : "") + (x * 100).toFixed(d) + " pp";
-const shortTime = (iso) => (iso ? iso.replace("T", " ").replace("Z", "") : "—");
-const titleCase = (s) => String(s ?? "").replace(/_/g, " ");
-const width = (frac) => raw("width:" + Math.max(0, Math.min(1, frac || 0)) * 100 + "%");
-
-const statusClass = (s) =>
-  s === "recovered" ? "recovered" : s === "open" ? "open"
-    : s === "stopped_holdout" ? "holdout" : "stopped";
-
-async function get(path) {
-  const res = await fetch(path);
-  if (!res.ok) throw new Error(path + " -> " + res.status);
-  return res.json();
+/* --------------------------------------------------------------------- api */
+async function api(path, opts) {
+  const res = await fetch(path, Object.assign({ headers: { "Content-Type": "application/json" } }, opts));
+  const body = await res.text();
+  let data = null;
+  try { data = body ? JSON.parse(body) : null; } catch (_) { data = { detail: body }; }
+  if (!res.ok) {
+    const err = new Error((data && (data.detail || data.message)) || (res.status + " " + res.statusText));
+    err.status = res.status;
+    throw err;
+  }
+  return data;
 }
 
-/* =============================================================== routing === */
-const VIEWS = {
-  overview:   ["Overview", "What is at stake, and what came back."],
-  impact:     ["Impact", "Money recovered because of the agent — not merely alongside it."],
-  causes:     ["By failure cause", "Where recovery is easy, and where it is not."],
-  pipeline:   ["Pipeline", "What actually happened to the events that arrived."],
-  guardrails: ["Guardrails", "The part of the system that says no."],
-  policy:     ["Decision policy", "A lookup, not a judgement call."],
-  model:      ["Model boundary", "What the model decides, and what it never touches."],
-  cases:      ["Cases", "Every row opens the full case file."],
+const post = (path, payload) => api(path, { method: "POST", body: JSON.stringify(payload || {}) });
+
+/* -------------------------------------------------------------------- fmt */
+const INR = new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 });
+const INR2 = new Intl.NumberFormat("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+const rupees = (paise) => "₹" + INR.format(Math.round((paise || 0) / 100));
+const rupees2 = (rs) => "₹" + INR2.format(rs || 0);
+const pct = (x, digits) => (100 * (x || 0)).toFixed(digits === undefined ? 1 : digits) + "%";
+const esc = (s) => String(s === null || s === undefined ? "" : s)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+const words = (s) => String(s || "").replace(/_/g, " ");
+const icon = (name, cls) => '<svg class="icon ' + (cls || "") + '"><use href="#i-' + name + '"/></svg>';
+
+function when(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d)) return esc(iso);
+  return d.toLocaleString(undefined, {
+    month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false,
+  });
+}
+
+function hours(h) {
+  if (h === null || h === undefined) return "—";
+  if (h < 1) return Math.round(h * 60) + " min";
+  if (h < 48) return h.toFixed(1) + " h";
+  return (h / 24).toFixed(1) + " d";
+}
+
+/* status -> visual role. Colour is never the only signal: the label ships with it. */
+const STATUS_ROLE = {
+  recovered: "ok",
+  open: "accent",
+  stopped_handoff: "warn",
+  stopped_unknown: "warn",
+  stopped_opt_out: "danger",
+  stopped_max_attempts: "danger",
+  stopped_cooldown_expired: "warn",
+  stopped_holdout: "control",
+};
+const statusBadge = (s) => '<span class="badge ' + (STATUS_ROLE[s] || "") + '">' + esc(words(s)) + "</span>";
+
+const ACTION_ROLE = {
+  RETRY_LATER: "accent", SEND_UPDATE_LINK: "ok", PROMISE_TO_PAY: "warn", STOP_HANDOFF: "",
 };
 
-function route() {
-  const name = (location.hash.replace(/^#\//, "") || "overview");
-  const view = VIEWS[name] ? name : "overview";
-  $$(".view").forEach((v) => v.classList.toggle("active", v.dataset.view === view));
-  $$("#nav a").forEach((a) => a.classList.toggle("active", a.dataset.view === view));
-  $("#view-title").textContent = VIEWS[view][0];
-  $("#view-q").textContent = VIEWS[view][1];
-  const sc = $("#scroll"); if (sc) sc.scrollTop = 0;
+const COLOUR = {
+  ok: "var(--ok)", accent: "var(--accent)", warn: "var(--warn)",
+  danger: "var(--danger)", control: "var(--control)", "": "var(--neutral)",
+};
+
+/* ------------------------------------------------------------------ state */
+const state = {
+  summary: null, mechanism: null, categories: null, health: null,
+  cases: [], control: null, job: null, jobTimer: null, jobCursor: 0,
+  loading: false,
+  sort: { key: "updated_at", dir: "descending" },
+  lastFocus: null,   // what to hand focus back to when the drawer closes
+};
+
+const $ = (sel, root) => (root || document).querySelector(sel);
+const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
+
+/* ----------------------------------------------------------------- toasts */
+function toast(text, kind) {
+  const el = document.createElement("div");
+  el.className = "toast " + (kind || "info");
+  el.innerHTML = icon(kind === "err" ? "warn" : kind === "ok" ? "check" : "info") +
+    "<span>" + esc(text) + "</span>";
+  $("#toasts").appendChild(el);
+  setTimeout(() => el.remove(), 4500);   // 3-5s: long enough to read, short enough not to nag
 }
 
-/* ====================================================== rail + banner === */
-function renderChips(s) {
-  const b = s.bounds;
-  const chips = [
-    ["", `max ${b.max_attempts} attempts`],
-    ["", `${b.cooldown_hours}h cooldown`],
-    ["", `${b.episode_window_days}d window`],
-    [b.llm_model ? "on" : "off", b.llm_model ? `model ${b.llm_model}` : "no model"],
-  ];
-  setHTML("#chips", chips.map(([cls, t]) => html`<span class="chip ${cls}">${t}</span>`));
-  setHTML("#rail-note", html`Bounds are hardcoded, not configurable at runtime.
-    Seed ${s.seed ?? "—"} · ${s.n_synthetic} synthetic · ${s.n_live} live test-mode.`);
+const _toasted = {};
+function toastOnce(key, text, kind) {
+  if (_toasted[key]) return;
+  _toasted[key] = true;
+  toast(text, kind);
+}
 
+/* ------------------------------------------------------------------ views */
+const VIEWS = {
+  overview:   { title: "Overview", q: "Did this recover money, and where did every case end up?" },
+  impact:     { title: "Incremental impact", q: "How much of the recovery would not have happened anyway?" },
+  causes:     { title: "By failure cause", q: "Which failures are actually recoverable?" },
+  pipeline:   { title: "Pipeline", q: "What did the loop do, counted in rows?" },
+  guardrails: { title: "Guardrails", q: "What can this agent never do, and how often did that bind?" },
+  policy:     { title: "Decision policy", q: "How is the single intervention chosen?" },
+  model:      { title: "Model boundary", q: "Where is the model — and where is it not?" },
+  cases:      { title: "Cases", q: "Every case, and the complete file behind any one of them." },
+  control:    { title: "Control room", q: "Run the suite, replay the batch, and attack the running server." },
+};
+
+/* ============================================================== rendering */
+
+function renderChips() {
+  const h = state.health || {};
+  const c = state.control || {};
+  const s = state.summary || {};
+  const chips = [];
+
+  chips.push('<span class="chip ' + (h.status === "ok" ? "live" : "danger") +
+    '"><span class="dot"></span>API ' + esc(h.status || "down") + "</span>");
+
+  const provider = h.llm_provider || "none";
+  chips.push('<span class="chip ' + (provider === "none" ? "warn" : "ok") +
+    '"><span class="dot"></span>model: ' + esc(provider) + "</span>");
+
+  chips.push('<span class="chip ' + (h.razorpay_configured ? "ok" : "") +
+    '"><span class="dot"></span>razorpay ' + (h.razorpay_configured ? "test keys" : "not configured") + "</span>");
+
+  if (c.live_link_budget !== undefined) {
+    chips.push('<span class="chip"><span class="dot"></span>live links left: ' + esc(c.live_link_budget) + "</span>");
+  }
+  $("#chips").innerHTML = chips.join("");
+
+  const split = s.n_synthetic !== undefined
+    ? s.n_synthetic + " synthetic · " + s.n_live + " live"
+    : "no cases yet";
+  $("#rail-note").innerHTML = esc(split) + "<br>db: <code>" + esc(h.db_path || "recovery.db") + "</code>";
+
+  $("#nav-cases").textContent = state.cases.length ? state.cases.length : "";
+  const guards = state.mechanism ? state.mechanism.invariants.reduce((a, i) => a + i.stops, 0) : 0;
+  $("#nav-guards").textContent = guards ? guards + " stops" : "";
+  const inc = s.incremental;
+  $("#nav-impact").textContent = inc && inc.available ? pct(inc.lift, 0) : "";
+}
+
+function renderBanner() {
+  const s = state.summary, h = state.health, el = $("#banner");
+  if (!s || !h) { el.className = "banner"; return; }
+  const notes = [];
+  if (h.llm_provider === "none") {
+    notes.push("No model is configured, so every case the rules cannot reach stops as <code>unknown</code> " +
+      "instead of being guessed. Both behaviours are correct; this is the conservative one.");
+  }
+  if ((s.n_synthetic || 0) + (s.n_live || 0) === 0) {
+    notes.push('The database is empty. Replay the batch from the <a href="#/control">control room</a> to populate it.');
+  }
+  if (s.reconciliation && !(s.reconciliation.counts_balance && s.reconciliation.amounts_balance)) {
+    notes.push("Reconciliation does not balance — counts or amounts disagree with the case table.");
+  }
+  if (!notes.length) { el.className = "banner"; el.innerHTML = ""; return; }
+  el.className = "banner show" + (notes.length > 1 ? " warn" : "");
+  el.innerHTML = icon("info") + "<span>" + notes.join(" ") + "</span>";
+}
+
+/* -------------------------------------------------------------- overview */
+function renderOverview() {
+  const s = state.summary;
+  if (!s) return;
+  const rate = s.recovery_rate || {};
   const inc = s.incremental || {};
-  $("#nav-impact").textContent = inc.available ? pp(inc.lift, 0) : "—";
-  $("#nav-cases").textContent = s.n_cases;
-}
-
-function renderBanner(s) {
-  setHTML("#banner", html`<span>⚠</span><div><b>Synthetic demo data.</b>
-    ${s.n_synthetic} of ${s.n_cases} cases are generated (seed ${s.seed ?? "—"});
-    ${s.n_live} are Razorpay test-mode. No real customers.
-    <b>No message was ever transmitted</b> — every notification is composed, validated and logged only.
-    Time-to-recovery uses the ${s.time_basis}. Outcome probabilities are modelling assumptions,
-    not measured market data.</div>`);
-}
-
-/* ============================================================== overview === */
-function renderTiles(s) {
-  const rate = s.recovery_rate;
-  const ttr = s.avg_time_to_recovery_hours;
-  const inc = s.incremental || {};
-
-  const incTile = inc.available
-    ? ["accent", "₹ incremental", fmtRupees(inc.incremental_paise_total),
-       `${pp(inc.lift)} vs control · ${inc.significant ? "CI excludes zero" : "CI includes zero"}`]
-    : ["", "₹ incremental", "—", "no control arm — run with --holdout"];
 
   const tiles = [
-    ["", "₹ at risk", fmtRupees(s.total_at_risk_paise), `${s.n_cases} cases`],
-    ["recovered", "₹ recovered (gross)", fmtRupees(s.total_recovered_paise),
-     `${pct(rate.rate)} of ${rate.denominator} closed cases`],
-    incTile,
-    ["", "Avg time to recovery", ttr === null ? "—" : (ttr / 24).toFixed(1) + " d",
-     ttr === null ? "no recoveries yet" : `${ttr} h (${s.time_basis})`],
-    /* Stopped sits beside ₹ recovered at equal visual weight, on purpose (docs/07 §4). */
-    ["stopped", "Stopped & handed off", String(s.stopped.total), "each with a complete case file"],
-    ["llm", "Model involvement", `${s.llm.classified} + ${s.llm.drafted}`,
-     `classified · copy drafts (${s.llm.fallback_to_template} template fallbacks)`],
+    { k: "₹ at risk", v: rupees2(s.total_at_risk_rupees), cls: "",
+      s: (rate.strict_denominator || 0) + " cases entered the pipeline", trace: "at_risk" },
+    { k: "₹ recovered", v: rupees2(s.total_recovered_rupees), cls: "ok",
+      s: (s.n_recovered || 0) + " cases confirmed by a recovery signal", trace: "recovered" },
+    { k: "Recovery rate", v: pct(rate.rate), cls: "ok",
+      s: (rate.numerator || 0) + "/" + (rate.denominator || 0) + " treated · strict " +
+         pct(rate.strict_rate) + " over all " + (rate.strict_denominator || 0) },
+    { k: "Incremental lift", v: inc.available ? pct(inc.lift) : "n/a", cls: "control",
+      s: inc.available
+        ? "vs a " + ((inc.control && inc.control.n) || 0) + "-case untouched control arm" +
+          (inc.significant ? " · significant" : " · not significant")
+        : "no control arm in this run" },
+    { k: "Avg time to recovery", v: hours(s.avg_time_to_recovery_hours), cls: "",
+      s: esc(s.time_basis || "") },
+    { k: "Stopped", v: String((s.stopped && s.stopped.total) || 0), cls: "warn",
+      s: "each one has a complete case file to hand off", trace: "stopped" },
   ];
-  setHTML("#tiles", tiles.map(([cls, label, value, sub]) => html`
-    <div class="tile ${cls}">
-      <div class="label">${label}</div>
-      <div class="value">${value}</div>
-      <div class="sub">${sub}</div>
-    </div>`));
+
+  $("#tiles").innerHTML = tiles.map((t) =>
+    '<div class="tile ' + t.cls + '">' +
+      '<div class="tile-k">' + esc(t.k) + "</div>" +
+      '<div class="tile-v">' + esc(t.v) + "</div>" +
+      '<div class="tile-s">' + t.s + "</div>" +
+      (t.trace ? '<a class="trace" href="#" data-trace="' + esc(t.trace) + '">' +
+        icon("trace") + "trace the case ids</a>" : "") +
+    "</div>").join("");
+
+  /* ---- where every case ended */
+  const by = (s.stopped && s.stopped.by_status) || {};
+  const rows = [["recovered", s.n_recovered || 0, "ok"], ["open", s.n_open || 0, "accent"]]
+    .concat(Object.keys(by).filter((k) => by[k] > 0).map((k) => [k, by[k], STATUS_ROLE[k] || "warn"]))
+    .filter((r) => r[1] > 0);
+
+  const total = rows.reduce((a, r) => a + r[1], 0) || 1;
+  $("#outcome-n").textContent = total + " cases";
+  $("#outcome-split").innerHTML =
+    '<div class="split" role="img" aria-label="' +
+      esc(rows.map((r) => words(r[0]) + ": " + r[1]).join(", ")) + '">' +
+      rows.map((r) => '<span style="width:' + (100 * r[1] / total).toFixed(2) +
+        "%;background:" + (COLOUR[r[2]] || COLOUR[""]) + '"></span>').join("") +
+    "</div>" +
+    '<table class="grid" style="margin-top:12px">' +
+      '<thead><tr><th>Outcome</th><th class="num">Cases</th><th class="num">Share</th></tr></thead><tbody>' +
+      rows.map((r) => "<tr><td>" + statusBadge(r[0]) + '</td><td class="num">' + r[1] +
+        '</td><td class="num">' + pct(r[1] / total) + "</td></tr>").join("") +
+    "</tbody></table>";
+
+  $("#effect-mini").innerHTML = inc.available ? armsHtml(inc, true) :
+    '<div class="empty">This run has no control arm, so gross recovery is all that can be claimed.<br>' +
+    "Replay the batch with a holdout fraction from the control room to measure incrementality.</div>";
+
+  renderFlow($("#flow-mini"), true);
 }
 
-/* ------------------------------------------------ overview: outcome split -- */
-function renderOutcomeSplit(s) {
-  const by = s.stopped.by_status || {};
-  const holdout = by.stopped_holdout || 0;
-  const stoppedOther = s.stopped.total - holdout;
-  const parts = [
-    ["s-recovered", "Recovered", s.n_recovered, "money confirmed back"],
-    ["s-stopped", "Stopped & handed off", stoppedOther, "each with a complete case file"],
-    ["s-holdout", "Control arm", holdout, "deliberately never touched"],
-    ["s-open", "Still open", s.n_open, "inside the episode window"],
-  ].filter(([, , n]) => n > 0);
-  const total = parts.reduce((a, [, , n]) => a + n, 0) || 1;
+/* ---------------------------------------------------------------- impact */
+function armsHtml(inc, compact) {
+  const t = inc.treated || {}, c = inc.control || {};
+  const max = Math.max(t.rate || 0, c.rate || 0, 0.0001);
+  const bar = (label, arm, cls) =>
+    '<div style="margin-bottom:10px">' +
+      '<div style="display:flex;gap:8px;align-items:baseline;font-size:12px">' +
+        "<strong>" + esc(label) + "</strong>" +
+        '<span class="dim">n=' + (arm.n || 0) + "</span>" +
+        '<span style="margin-left:auto">' + pct(arm.rate) +
+          ' <span class="dim">(' + (arm.recovered || 0) + " recovered)</span></span>" +
+      "</div>" +
+      '<div class="bar ' + cls + '" style="margin-top:5px"><span style="width:' +
+        (100 * (arm.rate || 0) / max).toFixed(1) + '%"></span></div>' +
+    "</div>";
 
-  setHTML("#outcome-split", html`
-    <div class="split">${parts.map(([cls, , n]) =>
-      html`<span class="${cls}" style="${width(n / total)}"></span>`)}</div>
-    <div class="split-key">${parts.map(([cls, label, n, note]) => html`
-      <div><i class="${cls}" style="background:${
-        cls === "s-recovered" ? "#0a7146" : cls === "s-stopped" ? "#d9a03c"
-        : cls === "s-holdout" ? "#475569" : "#e3e6eb"}"></i>
-        <span>${label} <span class="muted">— ${note}</span></span>
-        <span class="k-n">${n}</span></div>`)}</div>`);
+  const lift =
+    '<div style="display:flex;gap:22px;flex-wrap:wrap;align-items:flex-end;margin-top:4px">' +
+      "<div>" +
+        '<div class="tile-k">Lift (treated − control)</div>' +
+        '<div class="tile-v" style="font-size:23px">' + pct(inc.lift) + "</div>" +
+        '<div class="tile-s">95% CI ' + pct(inc.lift_ci95[0]) + " … " + pct(inc.lift_ci95[1]) +
+          " · " + (inc.significant
+            ? '<span class="badge ok">significant</span>'
+            : '<span class="badge warn">not significant</span>') + "</div>" +
+      "</div>" +
+      "<div>" +
+        '<div class="tile-k">Incremental ₹</div>' +
+        '<div class="tile-v" style="font-size:23px">' + rupees(inc.incremental_paise_total) + "</div>" +
+        '<div class="tile-s">of ' + rupees(inc.gross_recovered_paise) + " gross · CI " +
+          rupees(inc.incremental_paise_ci95[0]) + " … " + rupees(inc.incremental_paise_ci95[1]) + "</div>" +
+      "</div>" +
+    "</div>";
+
+  return bar("Treated", t, "") + bar("Control (never touched)", c, "control") + lift +
+    (compact ? "" : '<p class="foot-note" style="margin-top:14px">' + esc(inc.basis || "") +
+      " Bootstrap over " + (inc.bootstrap_samples || 0) + " resamples.</p>");
 }
 
-function renderEffectMini(s) {
-  const inc = s.incremental || {};
-  if (!inc.available) {
-    setHTML("#effect-mini", html`<div class="empty">
-      No control arm in this batch, so every rupee shown is <b>gross</b> — it cannot be separated from
-      what would have come back anyway. Re-run with <code>--holdout 0.3</code> to measure the difference.
-    </div>`);
+function renderImpact() {
+  const inc = state.summary && state.summary.incremental;
+  const el = $("#effect-panel");
+  if (!inc || !inc.available) {
+    el.innerHTML = '<div class="empty">No control arm in this run.<br>' +
+      "Replay the batch with <code>holdout &gt; 0</code> from the control room and this becomes measurable.</div>";
     return;
   }
-  const [lo, hi] = inc.lift_ci95;
-  setHTML("#effect-mini", html`
-    <div class="lift-box ${inc.significant ? "" : "null"}" style="margin-top:0">
-      <div class="lift-big">${pp(inc.lift)}</div>
-      <div class="lift-sub">recovery-rate lift over the untreated control arm,
-        95% CI [${pp(lo)}, ${pp(hi)}]</div>
-      <div class="lift-sub" style="margin-top:7px">
-        <b>${fmtRupees(inc.incremental_paise_total)}</b> incremental of
-        <b>${fmtRupees(inc.gross_recovered_paise)}</b> gross
-      </div>
-    </div>`);
+  el.innerHTML =
+    '<div class="panel-head"><h2>Treated vs control</h2><span class="spacer"></span>' +
+      '<span class="muted">randomised at intake, assignment travels with the event</span></div>' +
+    '<div class="panel-body">' + armsHtml(inc, false) + "</div>";
 }
 
-/* ================================================== did it work (effect) === */
-function renderEffect(s) {
-  const inc = s.incremental || {};
-  if (!inc.available) {
-    setHTML("#effect-panel", html`
-      <div class="empty">
-        <b>No control arm in this batch.</b> Every recovered rupee here is <em>gross</em> — it cannot be
-        separated from what would have come back anyway.
-        <pre>python scripts/run_batch.py --cases synthetic_cases.json --db recovery.db --holdout 0.3</pre>
-        re-runs the batch with 30% of cases held out untreated, and this panel then reports the difference
-        between the arms with a confidence interval.
-      </div>`);
+/* ---------------------------------------------------------------- causes */
+function renderCategories() {
+  const rows = state.categories || [];
+  const tbody = $("#categories tbody");
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty">No cases yet.</td></tr>';
     return;
   }
-  const t = inc.treated, c = inc.control;
-  const max = Math.max(t.rate, c.rate, 0.01);
-  const [lo, hi] = inc.lift_ci95;
-  const [mlo, mhi] = inc.incremental_paise_ci95;
-
-  setHTML("#effect-panel", html`
-    <div class="arm-row">
-      <div class="arm-label">Treated<small>agent ran</small></div>
-      <div class="arm-bar treated"><span style="${width(t.rate / max)}"></span></div>
-      <div class="arm-val">${pct(t.rate)} <small>${t.recovered}/${t.n}</small></div>
-    </div>
-    <div class="arm-row">
-      <div class="arm-label">Control<small>held out</small></div>
-      <div class="arm-bar control"><span style="${width(c.rate / max)}"></span></div>
-      <div class="arm-val">${pct(c.rate)} <small>${c.recovered}/${c.n}</small></div>
-    </div>
-
-    <div class="lift-box ${inc.significant ? "" : "null"}">
-      <div class="lift-big">${pp(inc.lift)}</div>
-      <div class="lift-sub">
-        95% CI [${pp(lo)}, ${pp(hi)}] — the interval
-        <b>${inc.significant ? "excludes" : "includes"} zero</b>, so the direction of the effect
-        ${inc.significant ? "is not in doubt" : "is not established"} at this sample size.
-      </div>
-      <div class="lift-sub" style="margin-top:8px">
-        <b>${fmtRupees(inc.incremental_paise_total)}</b> incremental
-        (95% CI [${fmtRupees(mlo)}, ${fmtRupees(mhi)}]) out of
-        <b>${fmtRupees(inc.gross_recovered_paise)}</b> gross across ${t.n} treated cases.
-      </div>
-    </div>
-
-    <p class="sec-note" style="margin:12px 0 0">
-      <b>Intention-to-treat:</b> every case counts in the arm it was assigned to, whatever status it
-      reached — a treated case the agent <em>refused</em> to act on stays in the treated denominator.
-      Dropping those would flatter the result by exactly the cases handled most conservatively.
-      The interval is sampling uncertainty only: it says how much of the gap could be chance at
-      ${t.n + c.n} cases, not whether the underlying outcome model is right.
-      Bootstrap over ${inc.bootstrap_samples.toLocaleString("en-IN")} resamples.
-    </p>`);
+  const max = Math.max.apply(null, rows.map((r) => r.recovery_rate || 0).concat([0.0001]));
+  tbody.innerHTML = rows.map((r) =>
+    "<tr>" +
+      '<td><a href="#/cases" data-filter-category="' + esc(r.category) + '">' + esc(words(r.category)) + "</a></td>" +
+      '<td class="num">' + r.n_cases + "</td>" +
+      '<td class="num">' + r.n_recovered + "</td>" +
+      '<td class="num">' + pct(r.recovery_rate) + "</td>" +
+      '<td class="num">' + rupees(r.at_risk_paise) + "</td>" +
+      '<td class="num">' + rupees(r.recovered_paise) + "</td>" +
+      '<td><div class="bar"><span style="width:' +
+        (100 * (r.recovery_rate || 0) / max).toFixed(1) + '%"></span></div></td>' +
+    "</tr>").join("");
 }
 
-/* ============================================================== the loop === */
-function renderFlow(m) {
+/* -------------------------------------------------------------- pipeline */
+function renderFlow(el, compact) {
+  const m = state.mechanism;
+  if (!m || !el) return;
   const f = m.funnel;
-  const stages = [
-    [f.events, "Detect", "webhooks verified by signature and deduplicated", false],
-    [f.diagnoses, "Diagnose", "into one of six fixed causes — rules first", false],
-    [null, "Gate", "I1–I4 checked before any decision is made", true],
-    [f.decisions, "Decide", "one action, from a static policy cell", false],
-    [null, "Gate", "I1–I4 re-checked against fresh state", true],
-    [f.executions, "Execute", `${f.contacts} of these put a message in front of a person`, false],
-    [f.recovered, "Recovered", "confirmed by a real recovery signal, never by sending", false],
+  const steps = [
+    { k: "Detect", v: f.events, s: "webhook events stored, deduped on the Razorpay event id" },
+    { k: "Cases", v: f.cases, s: "one recovery episode per subscription" },
+    { k: "Diagnose", v: f.diagnoses, s: "rules first, model only on what they miss" },
+    { k: "Gate", v: f.blocked, s: "decisions blocked by an invariant", gate: true },
+    { k: "Decide", v: f.decisions, s: "one action from the policy table" },
+    { k: "Execute", v: f.executions, s: f.contacts + " of them contacted a customer" },
+    { k: "Recovered", v: f.recovered, s: "confirmed by a recovery signal, never by sending a link" },
   ];
-  setHTML("#flow", stages.map(([n, name, what, gate]) => html`
-    <div class="stage-card ${gate ? "gate" : ""}">
-      <div class="st-name">${name}</div>
-      <div class="st-n">${gate ? (f.blocked ? f.blocked + " blocked" : "✓") : n.toLocaleString("en-IN")}</div>
-      <div class="st-what">${what}</div>
-    </div>`));
+  el.innerHTML = steps.map((s, i) =>
+    (i ? '<div class="arrow">' + icon("arrow") + "</div>" : "") +
+    '<div class="step ' + (s.gate ? "gate" : "") + '">' +
+      '<div class="step-k">' + esc(s.k) + "</div>" +
+      '<div class="step-v">' + esc(s.v) + "</div>" +
+      (compact ? "" : '<div class="step-s">' + esc(s.s) + "</div>") +
+    "</div>").join("");
 }
 
-/* =========================================================== guardrails === */
-function renderGuards(m) {
-  const fired = m.invariants.reduce((n, i) => n + i.stops + i.defers, 0);
-  $("#nav-guards").textContent = fired ? String(fired) : "";
-  setHTML("#guards", m.invariants.map((i) => {
-    const bits = [];
-    if (i.stops) bits.push(html`stopped <b>${i.stops}</b> case${i.stops === 1 ? "" : "s"}`);
-    if (i.defers) bits.push(html`delayed <b>${i.defers}</b> intervention${i.defers === 1 ? "" : "s"}`);
-    const count = bits.length
-      ? raw(bits.map(String).join(" · "))
-      : html`<span class="muted">never needed to fire in this batch — the policy table stayed inside it</span>`;
-    return html`
-      <div class="guard">
-        <div class="code">${i.code}</div>
-        <div>
-          <div class="g-title">${i.title}</div>
-          <div class="g-plain">${i.plain}</div>
-          <div class="g-count">${count}</div>
-          <div class="g-rule">enforced as: ${i.rule}</div>
-        </div>
-      </div>`;
-  }));
+function renderPipeline() {
+  renderFlow($("#flow"), false);
+  const m = state.mechanism;
+  if (!m) return;
+  const b = m.bounds;
+  $("#funnel-notes").innerHTML =
+    '<div class="panel-head"><h2>Bounds the loop runs under</h2></div>' +
+    '<div class="panel-body"><dl class="kv">' +
+      "<dt>Max attempts per case</dt><dd>" + b.max_attempts +
+        " — attempt " + b.max_attempts + " is terminal in every policy row</dd>" +
+      "<dt>Contact cooldown</dt><dd>" + b.cooldown_hours + " h between two messages to one customer</dd>" +
+      "<dt>Episode window</dt><dd>" + b.episode_window_days +
+        " days, after which an open case closes rather than lingering</dd>" +
+      "<dt>Promise-to-pay window</dt><dd>" + b.promise_window_hours +
+        " h grace, then handoff — never another retry</dd>" +
+    "</dl></div>";
 }
 
-/* ======================================================== policy + rules === */
-function renderPolicy(m) {
-  const atts = [...new Set(m.policy.map((p) => p.attempt))].sort();
-  const head = html`<thead><tr><th></th>${
-    atts.map((a) => html`<th>Attempt ${a}</th>`)}</tr></thead>`;
-  const body = m.categories.map((cat) => {
-    const cells = atts.map((a) => {
-      const cell = m.policy.find((p) => p.category === cat && p.attempt === a);
-      if (!cell) return html`<td></td>`;
-      const note = cell.action === "STOP_HANDOFF" ? "to a human"
-        : cell.delay_hours ? `after ${cell.delay_hours}h` : "immediately";
-      return html`<td><div class="cell ${cell.action}">
-        <div class="act">${titleCase(cell.action)}</div>
-        <div class="dly">${note}</div>
-      </div></td>`;
-    });
-    return html`<tr><td class="rowhead">${cat}</td>${cells}</tr>`;
+/* ------------------------------------------------------------ guardrails */
+function renderGuards() {
+  const m = state.mechanism;
+  if (!m) return;
+  $("#guards").innerHTML = m.invariants.map((i) =>
+    '<div class="guard">' +
+      '<div class="guard-head">' +
+        '<span class="guard-code">' + esc(i.code) + "</span>" +
+        "<h4>" + esc(i.title) + "</h4>" +
+        '<span class="counts">' +
+          '<span class="badge ' + (i.stops ? "danger" : "") + '">' + i.stops +
+            " stop" + (i.stops === 1 ? "" : "s") + "</span>" +
+          (i.defers ? '<span class="badge warn">' + i.defers + " deferred</span>" : "") +
+        "</span>" +
+      "</div>" +
+      '<p class="guard-plain">' + esc(i.plain) + "</p>" +
+      '<div class="guard-rule">' + esc(i.rule) + "</div>" +
+    "</div>").join("");
+}
+
+/* ---------------------------------------------------------------- policy */
+function renderPolicy() {
+  const m = state.mechanism;
+  if (!m) return;
+  const attempts = m.bounds.max_attempts;
+  const cats = m.categories;
+  const cell = (cat, att) => {
+    const p = m.policy.find((x) => x.category === cat && x.attempt === att);
+    if (!p) return "<td></td>";
+    return '<td><div class="cell a-' + esc(p.action) + '">' +
+      '<div class="act">' + esc(words(p.action)) + "</div>" +
+      '<div class="delay">' + (p.delay_hours ? "+" + p.delay_hours + " h" : "immediate") + "</div>" +
+      "</div></td>";
+  };
+  const head = "<thead><tr><th>Cause</th>" +
+    Array.from({ length: attempts }, (_, i) => "<th>Attempt " + (i + 1) + "</th>").join("") + "</tr></thead>";
+  const body = "<tbody>" + cats.map((c) =>
+    "<tr><th>" + esc(words(c)) + "</th>" +
+    Array.from({ length: attempts }, (_, i) => cell(c, i + 1)).join("") + "</tr>").join("") + "</tbody>";
+  $("#policy").innerHTML = head + body;
+  $("#policy-note").textContent = cats.length + " × " + attempts + " = " +
+    (cats.length * attempts) + " cells, all filled";
+  $("#policy-legend").innerHTML = m.actions.map((a) =>
+    '<span class="key"><span class="sw" style="background:' +
+      (a === "RETRY_LATER" ? "var(--accent)" : a === "SEND_UPDATE_LINK" ? "var(--ok)" :
+       a === "PROMISE_TO_PAY" ? "var(--warn)" : "var(--neutral)") + '"></span>' +
+      esc(words(a)) + "</span>").join("");
+
+  $("#rules tbody").innerHTML = m.rules.map((r) =>
+    "<tr>" +
+      '<td class="mono">' + esc(r.id) + "</td>" +
+      "<td>" + esc(words(r.category)) + "</td>" +
+      '<td class="num">' + r.n_matched + "</td>" +
+      '<td class="dim">' + (r.patterns.length
+        ? esc(r.patterns.join(" · ")) + (r.n_patterns > r.patterns.length
+          ? ' <span class="dim">+' + (r.n_patterns - r.patterns.length) + " more</span>" : "")
+        : "<em>fallback — nothing matched</em>") + "</td>" +
+    "</tr>").join("");
+}
+
+/* ----------------------------------------------------------------- model */
+function renderModel() {
+  const m = state.mechanism, s = state.summary;
+  if (!m || !s) return;
+  const llm = s.llm || {};
+  const b = s.bounds || {};
+  const modes = s.execution_modes || {};
+  $("#boundary").innerHTML =
+    '<div class="grid-2">' +
+      '<div class="panel"><div class="panel-head"><h2>What the model may do</h2></div>' +
+        '<div class="panel-body"><dl class="kv">' +
+          "<dt>Classify a cause</dt><dd>only when no rule matched — " + (llm.classified || 0) +
+            " case(s) this run, of which " + (llm.classified_to_unknown || 0) +
+            " resolved to <code>unknown</code> and stopped</dd>" +
+          "<dt>Draft message copy</dt><dd>" + (llm.drafted || 0) + " draft(s), of which " +
+            (llm.fallback_to_template || 0) +
+            " were rejected by the validator and replaced with a static template</dd>" +
+        "</dl>" +
+        '<p class="foot-note">Output is constrained to a fixed enum and a confidence floor of ' +
+          esc(b.llm_confidence_threshold) +
+          ". Anything below it is <code>unknown</code>, which stops the case.</p></div></div>" +
+      '<div class="panel"><div class="panel-head"><h2>What it may never do</h2></div>' +
+        '<div class="panel-body"><ul style="margin:0;padding-left:18px;line-height:1.85;' +
+          'color:var(--text-2);font-size:12.5px">' +
+          "<li>Choose an intervention — that is a static table lookup.</li>" +
+          "<li>Reach the executor. No money-moving call is reachable from a model output.</li>" +
+          "<li>Write a number. Drafts may contain no digit at all; amounts arrive by slot " +
+            "substitution, so an invented figure is unrepresentable, not merely detected.</li>" +
+          "<li>Write a URL. Links are injected by code after validation.</li>" +
+          "<li>Override an invariant. The invariants module imports neither the policy table " +
+            "nor the model.</li>" +
+        "</ul></div></div>" +
+    "</div>" +
+    '<div class="panel"><div class="panel-head"><h2>Copy validator</h2><span class="spacer"></span>' +
+      '<span class="muted">every rule below is checked deterministically before a message is used</span></div>' +
+      '<div class="panel-body"><dl class="kv">' +
+        '<dt>Allowed slots</dt><dd class="mono">' + esc(m.copy.slots.join("  ")) + "</dd>" +
+        "<dt>Max rendered length</dt><dd>" + esc(m.copy.max_chars) + " characters</dd>" +
+        '<dt>Forbidden words</dt><dd class="mono">' + esc(m.copy.forbidden.join("  ")) + "</dd>" +
+        '<dt>Mandatory disclosure</dt><dd class="mono">' + esc(m.copy.disclosure) + "</dd>" +
+      "</dl></div></div>" +
+    '<div class="panel"><div class="panel-head"><h2>Execution modes</h2></div>' +
+      '<div class="panel-body"><dl class="kv">' +
+        "<dt>Real Razorpay test-mode calls</dt><dd>" + (modes.razorpay_test || 0) + "</dd>" +
+        "<dt>Simulated</dt><dd>" + (modes.simulated || 0) +
+          " — recorded as simulated, never dressed up as live</dd>" +
+        "<dt>Provider</dt><dd>" + esc(b.llm_provider || "none") +
+          (b.llm_model ? " · " + esc(b.llm_model) : "") + "</dd>" +
+      "</dl></div></div>";
+}
+
+/* ----------------------------------------------------------------- cases */
+const caseArm = (c) => (c.is_holdout ? "control" : "treated");
+
+/* Sorting is client-side because the whole case list is already in memory — a round
+   trip to re-order ~100 rows would be slower than the render. Numbers compare as
+   numbers, everything else as text, and the sort is stable so a second key keeps the
+   order of the first. */
+function sortRows(rows) {
+  const { key, dir } = state.sort;
+  const sign = dir === "descending" ? -1 : 1;
+  rows.sort((a, b) => {
+    let x = a[key], y = b[key];
+    if (x === null || x === undefined) x = "";
+    if (y === null || y === undefined) y = "";
+    if (typeof x === "number" && typeof y === "number") return sign * (x - y);
+    return sign * String(x).localeCompare(String(y), undefined, { numeric: true });
   });
-  setHTML("#policy", html`${head}<tbody>${body}</tbody>`);
-
-  $("#policy-note").textContent =
-    `${m.policy.length} cells · every one filled, so the lookup cannot fall through`;
-
-  setHTML("#policy-legend", m.actions.map((a) =>
-    html`<span><i class="cell ${a}" style="border-radius:3px"></i>${titleCase(a)}</span>`));
-
-  const maxHits = Math.max(1, ...m.rules.map((r) => r.n_matched));
-  setHTML("#rules tbody", m.rules.map((r) => html`
-    <tr>
-      <td class="mono">${r.id}</td>
-      <td>${r.category}</td>
-      <td class="num">${r.n_matched}</td>
-      <td>
-        <div class="bar" style="${width(r.n_matched / maxHits)};margin-bottom:4px">
-          <span style="width:100%"></span></div>
-        <span class="muted mono">${r.patterns.length
-          ? r.patterns.join(" · ") + (r.n_patterns > r.patterns.length
-              ? ` … +${r.n_patterns - r.patterns.length} more` : "")
-          : "no text to classify — never sent to a model"}</span>
-      </td>
-    </tr>`));
+  return rows;
 }
 
-/* ============================================================== boundary === */
-function renderBoundary(s, m) {
-  const rows = [
-    ["Failure classification, clear cases", "Rule table R1–R7 on Razorpay error fields", false],
-    ["Failure classification, ambiguous cases",
-     "Output forced into the six-value enum; below the confidence threshold ⇒ unknown ⇒ stop", true],
-    ["Which intervention to run", "Static policy table", false],
-    ["Retry timing", "Hardcoded delays per policy row", false],
-    ["Stopping rules I1–I4", "Independent module, run before every decision and every execution", false],
-    ["Message wording",
-     "Drafts a slot skeleton; a deterministic validator checks it; static template on rejection", true],
-    ["Money-moving execution", "Deterministic executor calling Razorpay test-mode APIs", false],
-  ];
-  setHTML("#boundary", html`
-    <table class="grid">
-      <thead><tr><th>Capability</th><th>Owner</th></tr></thead>
-      <tbody>${rows.map(([cap, owner, isLlm]) => html`
-        <tr>
-          <td>${cap}</td>
-          <td>${isLlm ? html`<span class="pill llm">model</span> ` : ""}${owner}</td>
-        </tr>`)}
-      </tbody>
-    </table>
-    <p class="sec-note" style="margin:14px 0 0">
-      <b>The model cannot type a digit.</b> Copy is drafted as a slot skeleton —
-      ${m.copy.slots.map((x) => html`<code>${x}</code> `)}— and every value is substituted by code
-      afterwards. An invented amount is not merely detected, it is unrepresentable. Drafts are capped at
-      ${m.copy.max_chars} characters, must carry the literal <code>${m.copy.disclosure}</code> disclosure,
-      and may never contain a URL. In this batch the model produced <b>${s.llm.drafted}</b> accepted
-      drafts against <b>${s.llm.fallback_to_template}</b> static templates.
-    </p>`);
-}
-
-/* ============================================================ categories === */
-function renderCategories(rows) {
-  const max = Math.max(0.0001, ...rows.map((r) => r.recovery_rate));
-  setHTML("#categories tbody", rows.map((r) => html`
-    <tr>
-      <td class="mono">${r.category}</td>
-      <td class="num">${r.n_cases}</td>
-      <td class="num">${r.n_recovered}</td>
-      <td class="num">${pct(r.recovery_rate)}</td>
-      <td class="num">${fmtRupees(r.recovered_paise)}</td>
-      <td class="num">${r.n_stopped}</td>
-      <td class="bar-col"><div class="bar"><span style="${width(r.recovery_rate / max)}"></span></div></td>
-    </tr>`));
-}
-
-/* ============================================================== case list === */
-function attemptDots(used, max) {
-  const dots = [];
-  for (let i = 0; i < max; i++) dots.push(html`<i class="${i < used ? "used" : ""}"></i>`);
-  return html`<span class="dots" title="${used} of ${max} attempts used">${dots}</span>`;
+function applySortHeaders() {
+  $$("#cases-table th.sortable").forEach((th) => {
+    th.setAttribute("aria-sort", th.dataset.sort === state.sort.key ? state.sort.dir : "none");
+  });
 }
 
 function renderCases() {
-  const st = $("#f-status").value, cat = $("#f-category").value;
-  const arm = $("#f-arm").value, q = $("#f-text").value.trim().toLowerCase();
-  const max = state.summary.bounds.max_attempts;
+  const status = $("#f-status").value, cat = $("#f-category").value;
+  const arm = $("#f-arm").value, text = $("#f-text").value.trim().toLowerCase();
+
   const rows = state.cases.filter((c) =>
-    (!st || c.status === st) &&
+    (!status || c.status === status) &&
     (!cat || c.category === cat) &&
-    (!arm || (arm === "control") === !!c.is_holdout) &&
-    (!q || c.case_id.toLowerCase().includes(q) ||
-      (c.subscription_id || "").toLowerCase().includes(q)));
+    (!arm || caseArm(c) === arm) &&
+    (!text || (c.case_id + " " + c.subscription_id).toLowerCase().indexOf(text) !== -1));
 
-  $("#case-count").textContent = `${rows.length} of ${state.cases.length}`;
-  setHTML("#cases-table tbody", rows.length
-    ? rows.map((c) => html`
-      <tr data-id="${c.case_id}">
-        <td class="mono">${c.case_id}</td>
-        <td class="mono">${c.subscription_id}</td>
-        <td>${c.category ?? "—"}</td>
-        <td class="num">${fmtRupees(c.amount_at_risk_paise)}</td>
-        <td>${attemptDots(c.attempt_count, max)}</td>
-        <td><span class="pill ${statusClass(c.status)}">${titleCase(c.status)}</span></td>
-        <td><span class="pill ${c.is_holdout ? "holdout" : ""}">${c.is_holdout ? "control" : "treated"}</span></td>
-        <td><span class="pill ${c.synthetic ? "synthetic" : "live"}">${c.synthetic ? "synthetic" : "live test"}</span></td>
-        <td class="muted">${shortTime(c.updated_at)}</td>
-      </tr>`)
-    : html`<tr><td colspan="9" class="empty">No cases match these filters.</td></tr>`);
+  sortRows(rows);
 
-  $$("#cases-table tbody tr[data-id]").forEach((tr) =>
-    tr.addEventListener("click", () => openCase(tr.dataset.id)));
+  applySortHeaders();
+  $("#case-count").textContent = rows.length + " of " + state.cases.length + " cases";
+  const tbody = $("#cases-table tbody");
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="9" class="empty">Nothing matches these filters.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map((c) =>
+    '<tr data-case="' + esc(c.case_id) + '" tabindex="0">' +
+      '<td class="mono">' + esc(c.case_id.replace(/^case_/, "")) + "</td>" +
+      '<td class="mono dim">' + esc(c.subscription_id) + "</td>" +
+      "<td>" + (c.category ? esc(words(c.category)) : '<span class="dim">—</span>') + "</td>" +
+      '<td class="num">' + rupees2(c.amount_rupees) + "</td>" +
+      '<td class="num">' + c.attempt_count + "</td>" +
+      "<td>" + statusBadge(c.status) + "</td>" +
+      '<td><span class="badge ' + (c.is_holdout ? "control" : "") + '">' +
+        (c.is_holdout ? "control" : "treated") + "</span></td>" +
+      '<td><span class="badge ' + (c.synthetic ? "" : "accent") + '">' +
+        (c.synthetic ? "synthetic" : "live") + "</span></td>" +
+      '<td class="dim nowrap">' + when(c.updated_at) + "</td>" +
+    "</tr>").join("");
 }
 
-function fillFilters() {
-  const statuses = [...new Set(state.cases.map((c) => c.status))].sort();
-  const cats = [...new Set(state.cases.map((c) => c.category).filter(Boolean))].sort();
-  setHTML("#f-status", html`<option value="">all</option>${
-    statuses.map((s) => html`<option value="${s}">${titleCase(s)}</option>`)}`);
-  setHTML("#f-category", html`<option value="">all</option>${
-    cats.map((s) => html`<option value="${s}">${s}</option>`)}`);
+function fillCaseFilters() {
+  const statuses = Array.from(new Set(state.cases.map((c) => c.status))).sort();
+  const cats = Array.from(new Set(state.cases.map((c) => c.category).filter(Boolean))).sort();
+  const keep = (sel, values) => {
+    const el = $(sel), current = el.value;
+    el.innerHTML = '<option value="">all</option>' +
+      values.map((v) => '<option value="' + esc(v) + '">' + esc(words(v)) + "</option>").join("");
+    if (values.indexOf(current) !== -1) el.value = current;
+  };
+  keep("#f-status", statuses);
+  keep("#f-category", cats);
 }
 
-/* ======================================================= case file drawer === */
-function receiptChips(checks) {
-  if (!checks) return "";
-  return Object.entries(checks).map(([phase, marks]) => {
-    const items = Object.entries(marks)
-      .filter(([k]) => k !== "phase")
-      .map(([code, val]) => {
-        const cls = val === "pass" ? "" : val === "not_applicable" ? "na"
-          : String(val).startsWith("deferred") ? "defer" : "violated";
-        const label = val === "pass" ? code
-          : val === "not_applicable" ? `${code} n/a` : `${code} ${val}`;
-        return html`<span class="rcpt ${cls}">${label}</span>`;
-      });
-    return html`<div class="receipts"><span class="rcpt-phase">${phase.replace("_", "-")}</span>${items}</div>`;
-  });
-}
-
-function renderDecisions(decisions) {
-  if (!decisions.length)
-    return html`<div class="empty">No intervention was ever decided for this case.</div>`;
-  return decisions.map((d) => {
-    const x = d.execution;
-    return html`
-    <div class="dec">
-      <div class="dec-top">
-        <span class="n">attempt ${d.attempt_number}</span>
-        <span class="pill">${titleCase(d.action)}</span>
-        <span class="muted">policy cell <code>${d.policy_row_ref}</code></span>
-        <span class="pill ${d.status === "executed" ? "recovered" : "stopped"}">${titleCase(d.status)}</span>
-      </div>
-      <div class="kv">
-        <div><span>decided</span>${shortTime(d.decided_at)}</div>
-        <div><span>scheduled for</span>${shortTime(d.scheduled_for)}</div>
-        <div><span>executed via</span>${x ? x.mode : "—"}</div>
-        <div><span>copy source</span>${x && x.copy_source ? titleCase(x.copy_source) : "—"}</div>
-      </div>
-      ${receiptChips(d.invariant_check)}
-      ${x && x.message_copy ? html`
-        <details><summary>Simulated message — composed, validated, never transmitted</summary>
-          <pre class="copy">${x.message_copy}</pre>
-          <details><summary>validator result</summary>
-            <pre>${JSON.stringify(x.copy_validation, null, 2)}</pre></details>
-        </details>` : ""}
-      ${x ? html`<details><summary>execution payload</summary>
-        <pre>${JSON.stringify(x.result_payload, null, 2)}</pre></details>` : ""}
-    </div>`;
-  });
-}
-
-function renderTrail(trail) {
-  return html`<div class="trail">${trail.map((e) => html`
-    <div class="trail-row actor-${e.actor} stage-${e.stage}">
-      <div class="mono muted">${e.seq}</div>
-      <div class="mono muted">${shortTime(e.created_at)}</div>
-      <div class="stage">${e.stage}</div>
-      <div><span class="pill ${e.actor === "llm" ? "llm" : ""}">${e.actor}</span></div>
-      <div>
-        ${e.summary}
-        <details><summary>detail</summary><pre>${JSON.stringify(e.detail, null, 2)}</pre></details>
-      </div>
-    </div>`)}</div>`;
-}
-
-async function openCase(caseId) {
-  const d = await get(`/api/cases/${encodeURIComponent(caseId)}`);
-  const c = d.case;
-  const holdout = !!c.is_holdout;
-  $("#detail-id").textContent = c.id;
-  setHTML("#detail-body", html`
-    ${holdout ? html`<div class="banner" style="margin-bottom:16px"><span>⚗</span><div>
-      <b>Control arm.</b> This case was deliberately never intervened on, so its outcome measures what
-      happens <em>without</em> the agent. The decision stage below records the action that was withheld.
-    </div></div>` : ""}
-    <div class="kv">
-      <div><span>status</span><span class="pill ${statusClass(c.status)}">${titleCase(c.status)}</span></div>
-      <div><span>cause</span>${c.current_category ?? "—"}</div>
-      <div><span>amount at risk</span>${fmtRupees(c.amount_at_risk_paise)}</div>
-      <div><span>attempts used</span>${attemptDots(c.attempt_count, d.bounds.max_attempts)}
-        <span class="muted"> ${c.attempt_count} of ${d.bounds.max_attempts}</span></div>
-      <div><span>subscription</span><span class="mono">${c.subscription_id}</span></div>
-      <div><span>customer</span><span class="mono">${c.customer_id}</span></div>
-      <div><span>opted out</span>${c.customer_opted_out ? "yes" : "no"}</div>
-      <div><span>arm</span>${holdout ? "control (held out)" : "treated"}</div>
-      <div><span>opened</span>${shortTime(c.created_at)}</div>
-      <div><span>closed</span>${shortTime(c.closed_at)}</div>
-      <div><span>last contact</span>${shortTime(c.last_contact_at)}</div>
-      <div><span>events received</span>${d.events.length}</div>
-    </div>
-    <div class="subhead">Decisions &amp; executions</div>
-    ${renderDecisions(d.decisions)}
-    <div class="subhead">Audit trail — append-only, ${d.audit_trail.length} entries</div>
-    ${renderTrail(d.audit_trail)}`);
-  $("#drawer").classList.add("show");
-  $("#drawer-back").classList.add("show");
+/* ------------------------------------------------------------ case drawer */
+function openDrawer() {
+  // Remember the row that opened this, so closing returns the keyboard where it was
+  // instead of dumping focus back at the top of the document.
+  if (!$("#drawer").classList.contains("on")) {
+    state.lastFocus = document.activeElement;
+  }
+  $("#drawer").classList.add("on");
+  $("#drawer").setAttribute("aria-hidden", "false");
+  $("#drawer-back").classList.add("on");
 }
 
 function closeCase() {
-  $("#drawer").classList.remove("show");
-  $("#drawer-back").classList.remove("show");
+  const drawer = $("#drawer");
+  if (!drawer.classList.contains("on")) return;
+  drawer.classList.remove("on");
+  drawer.setAttribute("aria-hidden", "true");
+  $("#drawer-back").classList.remove("on");
+  if (state.lastFocus && document.contains(state.lastFocus)) state.lastFocus.focus();
+  state.lastFocus = null;
 }
 
-/* ================================================================== boot === */
-async function load() {
-  const [summary, categories, caseRows, mechanism] = await Promise.all([
-    get("/api/summary"), get("/api/categories"), get("/api/cases"), get("/api/mechanism"),
-  ]);
-  state.summary = summary;
-  state.cases = caseRows;
-  state.mechanism = mechanism;
-
-  renderChips(summary);
-  renderBanner(summary);
-  renderTiles(summary);
-  renderOutcomeSplit(summary);
-  renderEffectMini(summary);
-  renderEffect(summary);
-  renderFlow(mechanism);
-  renderGuards(mechanism);
-  renderPolicy(mechanism);
-  renderBoundary(summary, mechanism);
-  renderCategories(categories);
-  fillFilters();
-  renderCases();
+/* A modal that lets Tab wander behind the scrim is not modal. Cycle within the drawer
+   while it is open; Escape still closes it (wired in boot). */
+function trapFocus(ev) {
+  if (ev.key !== "Tab") return;
+  const drawer = $("#drawer");
+  if (!drawer.classList.contains("on")) return;
+  const items = $$('a[href], button:not([disabled]), input, select, summary, [tabindex]:not([tabindex="-1"])', drawer)
+    .filter((el) => el.offsetParent !== null);
+  if (!items.length) return;
+  const first = items[0], last = items[items.length - 1];
+  if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus(); }
+  else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
 }
 
-$("#refresh").addEventListener("click", load);
-$("#close-detail").addEventListener("click", closeCase);
-$("#drawer-back").addEventListener("click", closeCase);
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeCase(); });
-["#f-status", "#f-category", "#f-arm"].forEach((s) => $(s).addEventListener("change", renderCases));
-$("#f-text").addEventListener("input", renderCases);
-window.addEventListener("hashchange", route);
+async function openCase(caseId) {
+  $("#detail-id").textContent = caseId;
+  $("#detail-body").innerHTML =
+    '<div class="skeleton" style="height:14px;margin-bottom:8px"></div>' +
+    '<div class="skeleton" style="height:14px;width:70%"></div>';
+  openDrawer();
+  $("#close-detail").focus();
 
-$("#expand").addEventListener("click", () => {
-  const anyClosed = $$("details").some((d) => !d.open);
-  $$("details").forEach((d) => (d.open = anyClosed));
-  $("#expand").textContent = anyClosed ? "Collapse all detail" : "Expand all detail";
-});
+  let d;
+  try { d = await api("/api/cases/" + encodeURIComponent(caseId)); }
+  catch (e) { $("#detail-body").innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; return; }
 
-route();
-load().catch((err) => {
-  setHTML("#tiles", html`<div class="tile" style="grid-column:1/-1">
-    <div class="label">Dashboard could not load</div>
-    <div class="sub">${err.message} — is the API running, and has the batch been run?</div></div>`);
-});
+  const c = d.case;
+
+  const decisions = d.decisions.map((x) =>
+    "<tr>" +
+      '<td class="num">' + x.attempt_number + "</td>" +
+      '<td><span class="badge ' + (ACTION_ROLE[x.action] || "") + '">' + esc(words(x.action)) + "</span></td>" +
+      '<td class="mono dim">' + esc(x.policy_row_ref) + "</td>" +
+      "<td>" + esc(words(x.status)) + "</td>" +
+      '<td class="dim nowrap">' + when(x.scheduled_for) + "</td>" +
+      "<td>" + (x.execution
+        ? '<span class="badge ' + (x.execution.status === "success" ? "ok" : "danger") + '">' +
+          esc(x.execution.mode) + "</span>"
+        : '<span class="dim">—</span>') + "</td>" +
+    "</tr>").join("");
+
+  const copies = d.decisions.filter((x) => x.execution && x.execution.message_copy).map((x) =>
+    '<div class="msg-copy">' +
+      '<div class="dim" style="font-size:10.5px;margin-bottom:4px">attempt ' + x.attempt_number +
+        " · " + esc(x.execution.copy_source || "") +
+        " · " + esc(x.execution.simulated_channel || "") + " · never transmitted</div>" +
+      esc(x.execution.message_copy) +
+    "</div>").join("");
+
+  $("#detail-body").innerHTML =
+    '<div class="panel"><div class="panel-head"><h2>Case</h2><span class="spacer"></span>' +
+      statusBadge(c.status) +
+      '<span class="badge ' + (c.is_holdout ? "control" : "") + '">' +
+        (c.is_holdout ? "control arm" : "treated") + "</span></div>" +
+      '<div class="panel-body"><dl class="kv">' +
+        '<dt>Subscription</dt><dd class="mono">' + esc(c.subscription_id) + "</dd>" +
+        '<dt>Customer</dt><dd class="mono">' + esc(c.customer_id) + "</dd>" +
+        "<dt>At risk</dt><dd>" + rupees2(c.amount_rupees) + "</dd>" +
+        "<dt>Diagnosed cause</dt><dd>" + (c.current_category ? esc(words(c.current_category)) : "—") + "</dd>" +
+        "<dt>Attempts used</dt><dd>" + c.attempt_count + " of " + d.bounds.max_attempts + "</dd>" +
+        "<dt>Opted out</dt><dd>" + (c.customer_opted_out ? "yes — nothing may be sent" : "no") + "</dd>" +
+        "<dt>Opened</dt><dd>" + when(c.created_at) + "</dd>" +
+        "<dt>Closed</dt><dd>" + when(c.closed_at) + "</dd>" +
+      "</dl>" +
+      (c.status === "open" && !c.customer_opted_out
+        ? '<button class="btn ghost" id="do-optout" style="margin-top:12px">' +
+          "Mark customer opted out (demonstrates I3)</button>"
+        : "") +
+      "</div></div>" +
+
+    (d.decisions.length
+      ? '<div class="panel"><div class="panel-head"><h2>Decisions</h2></div>' +
+        '<table class="grid"><thead><tr><th class="num">#</th><th>Action</th><th>Policy row</th>' +
+        "<th>Status</th><th>Scheduled</th><th>Executed as</th></tr></thead>" +
+        "<tbody>" + decisions + "</tbody></table></div>"
+      : "") +
+
+    (copies
+      ? '<div class="panel"><div class="panel-head"><h2>Message copy, as composed</h2></div>' +
+        '<div class="panel-body">' + copies + "</div></div>"
+      : "") +
+
+    '<div class="panel"><div class="panel-head"><h2>Audit trail</h2><span class="spacer"></span>' +
+      '<span class="muted">' + d.audit_trail.length + " entries, append-only</span></div>" +
+      '<div class="panel-body"><ol class="timeline">' +
+        d.audit_trail.map((a) =>
+          '<li class="s-' + esc(a.stage) + '">' +
+            '<div class="t-head"><span class="badge">' + esc(a.stage) + "</span>" +
+              '<span class="dim" style="font-size:10.5px">' + esc(a.actor) + "</span>" +
+              '<span class="t-time">' + when(a.created_at) + "</span></div>" +
+            '<div class="t-sum">' + esc(a.summary) + "</div>" +
+            "<details><summary>detail</summary><pre>" +
+              esc(JSON.stringify(a.detail, null, 2)) + "</pre></details>" +
+          "</li>").join("") +
+      "</ol></div></div>";
+
+  const optout = $("#do-optout");
+  if (optout) {
+    optout.addEventListener("click", async () => {
+      optout.disabled = true;
+      try {
+        await post("/api/cases/" + encodeURIComponent(caseId) + "/opt-out");
+        toast("Customer opted out — the next gate stops this case", "ok");
+        await refresh();
+        openCase(caseId);
+      } catch (e) { toast(e.message, "err"); optout.disabled = false; }
+    });
+  }
+}
+
+/* ----------------------------------------------------------- trace drawer */
+async function showTrace(metric) {
+  try {
+    const t = await api("/api/metrics/trace/" + encodeURIComponent(metric));
+    $("#detail-id").textContent = "trace · " + metric;
+    $("#detail-body").innerHTML =
+      '<div class="panel"><div class="panel-head"><h2>' + esc(words(metric)) + "</h2>" +
+        '<span class="spacer"></span><span class="muted">' + t.n_cases + " case ids</span></div>" +
+        '<div class="panel-body"><dl class="kv">' +
+          "<dt>Reported value</dt><dd>" +
+            (t.value_rupees !== null && t.value_rupees !== undefined ? rupees2(t.value_rupees) : esc(t.value)) +
+          "</dd>" +
+          '<dt>Endpoint</dt><dd class="mono">GET /api/metrics/trace/' + esc(metric) + "</dd>" +
+        "</dl>" +
+        '<p class="foot-note">Every id below drills down to its own audit trail — click one.</p>' +
+        '<div class="test-grid" style="margin-top:10px">' +
+          t.case_ids.map((id) =>
+            '<div class="test-row" data-case="' + esc(id) + '" tabindex="0" style="cursor:pointer">' +
+            '<span class="nm">' + esc(id) + "</span></div>").join("") +
+        "</div></div></div>";
+    openDrawer();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+/* ========================================================== control room */
+function renderControlStatics() {
+  const c = state.control;
+  if (!c) return;
+  const sel = $("#test-file");
+  if (sel.options.length <= 1 && c.test_files) {
+    sel.innerHTML = '<option value="">whole suite</option>' +
+      c.test_files.map((f) => '<option value="tests/' + esc(f) + '">' + esc(f) + "</option>").join("");
+  }
+  const cat = $("#i-category");
+  if (!cat.options.length && c.categories) {
+    cat.innerHTML = c.categories.map((k) =>
+      '<option value="' + esc(k) + '">' + esc(words(k)) + "</option>").join("");
+  }
+  updateCommands();
+  if (!c.enabled) {
+    $$("#actions button").forEach((b) => { b.disabled = true; });
+    toastOnce("control-off", "The control API is disabled (CONTROL_API_ENABLED=false).", "err");
+  }
+}
+
+function updateCommands() {
+  const n = $("#b-n").value, seed = $("#b-seed").value, h = $("#b-holdout").value;
+  $("#cmd-batch").textContent =
+    "python scripts/generate_synthetic.py --n " + n + " --seed " + seed +
+    " && python scripts/run_batch.py --holdout " + h;
+  $("#cmd-tests").textContent = "python -m pytest " + ($("#test-file").value || "tests") + " -v";
+}
+
+function consoleWrite(lines, reset) {
+  const el = $("#console");
+  if (reset) el.textContent = "";
+  const frag = document.createDocumentFragment();
+  lines.forEach((ln) => {
+    const span = document.createElement("span");
+    let cls = "l-" + ln.stream;
+    if (/\bPASSED\b/.test(ln.text)) cls += " pass";
+    if (/\bFAILED\b|\bERROR\b/.test(ln.text)) cls += " fail";
+    span.className = cls;
+    span.textContent = ln.text + "\n";   // textContent, never innerHTML: this is subprocess output
+    frag.appendChild(span);
+  });
+  el.appendChild(frag);
+  el.scrollTop = el.scrollHeight;
+}
+
+function setJobStatus(job) {
+  const badge = $("#job-status");
+  const map = { running: "accent", passed: "ok", failed: "danger", error: "danger" };
+  badge.className = "badge " + (job ? (map[job.status] || "") : "");
+  badge.textContent = job ? job.status : "idle";
+  $("#job-label").textContent = job ? job.label : "";
+  $("#job-elapsed").textContent = job ? job.elapsed_seconds.toFixed(1) + "s" : "";
+  const busy = !!(job && job.status === "running");
+  $$("#actions button").forEach((b) => { b.disabled = busy; });
+}
+
+async function startJob(path, payload) {
+  try {
+    const job = await post(path, payload);
+    state.job = job;
+    $("#job-result").innerHTML = "";
+    consoleWrite(job.lines || [], true);
+    state.jobCursor = job.next || 0;
+    setJobStatus(job);
+    pollJob();
+  } catch (e) {
+    toast(e.message, "err");
+  }
+}
+
+async function pollJob() {
+  if (state.jobTimer) clearTimeout(state.jobTimer);
+  if (!state.job) return;
+  try {
+    const s = await api("/api/control/jobs/" + state.job.id + "?after=" + state.jobCursor);
+    if (s.lines.length) consoleWrite(s.lines, false);
+    state.jobCursor = s.next;
+    state.job = s;
+    setJobStatus(s);
+    if (s.status === "running") {
+      state.jobTimer = setTimeout(pollJob, 700);
+      return;
+    }
+    renderJobResult(s);
+    if (s.kind === "batch") {
+      await refresh();
+      toast(s.status === "passed"
+        ? "Batch replayed — every panel is now this run"
+        : "Batch failed, see console", s.status === "passed" ? "ok" : "err");
+    } else if (s.kind === "tests") {
+      // pytest's own totals line, not a count of the lines this dashboard managed to
+      // parse — a parser that quietly drops a test must not be able to under-report.
+      const totals = (s.result && s.result.totals) || "";
+      toast(s.status === "passed" ? (totals || "tests passed") : "Tests failed — " + (totals || "see console"),
+        s.status === "passed" ? "ok" : "err");
+    }
+  } catch (e) {
+    toast(e.message, "err");
+    setJobStatus(null);
+  }
+}
+
+function renderJobResult(job) {
+  const el = $("#job-result");
+  if (job.kind === "tests" && job.result && job.result.tests) {
+    const r = job.result;
+    el.innerHTML =
+      '<div class="result-note ' + (job.status === "passed" ? "ok" : "fail") + '">' +
+        icon(job.status === "passed" ? "check" : "warn") +
+        "<span>" + esc(r.totals || (r.n + " tests")) + " — ran as <code>" +
+          esc(job.command[0]) + "</code></span></div>" +
+      '<div class="panel-body"><div class="test-grid">' +
+        r.tests.map((t) =>
+          '<div class="test-row ' + (t.outcome === "PASSED" ? "pass" : "fail") + '">' +
+            '<span class="glyph">' + (t.outcome === "PASSED" ? "✓" : "✕") + "</span>" +
+            '<span class="nm" title="' + esc(t.file + "::" + t.name) + '">' + esc(t.name) + "</span>" +
+          "</div>").join("") +
+      "</div></div>";
+  } else if (job.kind === "batch" && job.result && job.result.summary) {
+    const s = job.result.summary;
+    const n = (s.n_synthetic || 0) + (s.n_live || 0);
+    el.innerHTML =
+      '<div class="result-note ' + (job.status === "passed" ? "ok" : "fail") + '">' +
+        icon(job.status === "passed" ? "check" : "warn") +
+        "<span>" + rupees2(s.total_recovered_rupees) + " recovered of " +
+          rupees2(s.total_at_risk_rupees) + " at risk across " + n + " cases.</span></div>";
+  } else {
+    el.innerHTML = "";
+  }
+}
+
+function renderStormResult(r) {
+  const ok = r.held;
+  const rows = ["cases", "events", "decisions"].map((k) =>
+    "<tr><td>" + esc(k) + " for this subscription</td>" +
+      '<td class="num">' + r.observed[k] + '</td><td class="num">' + r.expected[k] + "</td>" +
+      "<td>" + (r.observed[k] === r.expected[k]
+        ? '<span class="badge ok">match</span>' : '<span class="badge danger">mismatch</span>') +
+    "</td></tr>").join("");
+
+  $("#job-result").innerHTML =
+    '<div class="result-note ' + (ok ? "ok" : "fail") + '">' + icon(ok ? "check" : "warn") +
+      "<span><strong>" + (ok ? "Held." : "Did not hold.") + "</strong> " + esc(r.explains) + "</span></div>" +
+    '<div class="panel-body"><table class="grid"><thead><tr><th>Check</th>' +
+      '<th class="num">Observed</th><th class="num">Expected</th><th>Verdict</th></tr></thead><tbody>' +
+      rows +
+      "<tr><td>exceptions escaping intake()</td>" +
+        '<td class="num">' + r.errors.length + '</td><td class="num">0</td><td>' +
+        (r.errors.length ? '<span class="badge danger">raised</span>' : '<span class="badge ok">none</span>') +
+      "</td></tr>" +
+    "</tbody></table>" +
+    '<p class="foot-note">Responses: ' +
+      Object.keys(r.responses).map((k) => r.responses[k] + "× <code>" + esc(k) + "</code>").join(" · ") +
+      ". " + (r.case_id
+        ? 'Opened <a href="#" data-case="' + esc(r.case_id) + '">' + esc(r.case_id) + "</a>."
+        : "") +
+    "</p></div>";
+}
+
+/* =============================================================== loading */
+function skeletonRow(w) {
+  return '<div class="skeleton" style="height:11px;width:' + w + '%;margin:9px 0"></div>';
+}
+
+/* The first paint has no data yet. An empty panel reads as "nothing happened"; a
+   skeleton reads as "not yet", which is the true statement. */
+function showSkeletons() {
+  if (state.summary) return;                 // only before the first successful load
+  $("#tiles").innerHTML = Array.from({ length: 6 }, () =>
+    '<div class="tile">' + skeletonRow(55) + skeletonRow(80) + skeletonRow(40) + "</div>").join("");
+  $("#cases-table tbody").innerHTML =
+    '<tr><td colspan="9">' + [92, 78, 85, 70].map(skeletonRow).join("") + "</td></tr>";
+}
+
+async function refresh() {
+  if (state.loading) return;
+  state.loading = true;
+  showSkeletons();
+  const svg = $("#refresh").querySelector("svg");
+  svg.classList.add("spin");
+  $("#refresh").setAttribute("aria-busy", "true");
+  try {
+    const results = await Promise.all([
+      api("/api/health"), api("/api/summary"), api("/api/mechanism"),
+      api("/api/categories"), api("/api/cases"),
+    ]);
+    state.health = results[0]; state.summary = results[1]; state.mechanism = results[2];
+    state.categories = results[3]; state.cases = results[4];
+    try { state.control = await api("/api/control/state"); }
+    catch (_) {
+      state.control = { enabled: false, test_files: [], categories: state.mechanism.categories };
+    }
+
+    renderChips(); renderBanner(); renderOverview(); renderImpact(); renderCategories();
+    renderPipeline(); renderGuards(); renderPolicy(); renderModel();
+    fillCaseFilters(); renderCases(); renderControlStatics();
+  } catch (e) {
+    toast("Could not reach the API: " + e.message, "err");
+  } finally {
+    svg.classList.remove("spin");
+    $("#refresh").removeAttribute("aria-busy");
+    state.loading = false;
+  }
+}
+
+/* ================================================================ router */
+function route() {
+  const hash = location.hash.replace(/^#\/?/, "") || "overview";
+  const name = VIEWS[hash] ? hash : "overview";
+  $$(".view").forEach((v) => v.classList.toggle("on", v.dataset.view === name));
+  $$("#nav a").forEach((a) => a.classList.toggle("on", a.dataset.view === name));
+  $("#view-title").textContent = VIEWS[name].title;
+  $("#view-q").textContent = VIEWS[name].q;
+  document.title = VIEWS[name].title + " — Recovery Agent";
+  // Screen readers otherwise stay parked wherever the old view was; only move focus on
+  // a real navigation, never on the initial render.
+  if (state.summary) $("#scroll").focus({ preventScroll: true });
+}
+
+/* ================================================================== wire */
+function boot() {
+  const saved = localStorage.getItem("ra-theme");
+  if (saved) document.documentElement.setAttribute("data-theme", saved);
+  $("#theme").addEventListener("click", () => {
+    const now = document.documentElement.getAttribute("data-theme");
+    const next = now === "light" ? "dark" : now === "dark" ? "" : "light";
+    if (next) {
+      document.documentElement.setAttribute("data-theme", next);
+      localStorage.setItem("ra-theme", next);
+    } else {
+      document.documentElement.removeAttribute("data-theme");
+      localStorage.removeItem("ra-theme");
+    }
+  });
+
+  window.addEventListener("hashchange", route);
+  route();
+
+  $("#refresh").addEventListener("click", () => refresh());
+
+  $("#tick").addEventListener("click", async () => {
+    const b = $("#tick");
+    b.disabled = true;
+    try {
+      const r = await post("/api/control/tick");
+      toast("Tick: " + r.n_executed + " executed, " + r.promises_lapsed +
+        " promise(s) lapsed, " + r.episodes_expired + " episode(s) closed", "ok");
+      await refresh();
+    } catch (e) { toast(e.message, "err"); }
+    finally { b.disabled = false; }
+  });
+
+  document.addEventListener("click", (ev) => {
+    const trace = ev.target.closest("[data-trace]");
+    if (trace) { ev.preventDefault(); showTrace(trace.dataset.trace); return; }
+
+    const filter = ev.target.closest("[data-filter-category]");
+    if (filter) { $("#f-category").value = filter.dataset.filterCategory; renderCases(); return; }
+
+    const row = ev.target.closest("[data-case]");
+    if (row) { ev.preventDefault(); openCase(row.dataset.case); }
+  });
+
+  document.addEventListener("keydown", (ev) => {
+    const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
+    if (ev.key === "Enter" && ev.target.closest && ev.target.closest("[data-case]")) {
+      ev.preventDefault();
+      openCase(ev.target.closest("[data-case]").dataset.case);
+    }
+    if (ev.key === "Escape") closeCase();
+    if (ev.key === "r" && !typing) refresh();
+    if (ev.key === "/" && !typing) {
+      ev.preventDefault();
+      location.hash = "#/cases";
+      $("#f-text").focus();
+    }
+  });
+
+  $("#close-detail").addEventListener("click", closeCase);
+  $("#drawer-back").addEventListener("click", closeCase);
+
+  ["#f-status", "#f-category", "#f-arm"].forEach((s) => $(s).addEventListener("change", renderCases));
+  $("#f-text").addEventListener("input", renderCases);
+
+  $$("#cases-table th.sortable").forEach((th) => {
+    const sortBy = () => {
+      const key = th.dataset.sort;
+      state.sort = {
+        key: key,
+        dir: state.sort.key === key && state.sort.dir === "ascending" ? "descending" : "ascending",
+      };
+      renderCases();
+    };
+    th.tabIndex = 0;
+    th.addEventListener("click", sortBy);
+    th.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); sortBy(); }
+    });
+  });
+
+  document.addEventListener("keydown", trapFocus);
+
+  ["#b-n", "#b-seed", "#b-holdout", "#test-file"].forEach((s) =>
+    $(s).addEventListener("change", updateCommands));
+
+  $("#run-tests").addEventListener("click", () =>
+    startJob("/api/control/tests", { path: $("#test-file").value || null }));
+
+  $("#run-batch").addEventListener("click", () => {
+    const n = Number($("#b-n").value);
+    const seed = Number($("#b-seed").value);
+    const holdout = Number($("#b-holdout").value);
+    if (!confirm("Replay " + n + " cases (seed " + seed + ", holdout " + holdout +
+        ") into a fresh database?\n\nThis deletes the current recovery.db.")) return;
+    startJob("/api/control/batch", { n: n, seed: seed, holdout: holdout, live_links: 0 });
+  });
+
+  $("#run-storm").addEventListener("click", async () => {
+    const btn = $("#run-storm");
+    btn.disabled = true;
+    try {
+      const r = await post("/api/control/storm", {
+        n: Number($("#s-n").value), distinct: $("#s-mode").value === "distinct",
+      });
+      consoleWrite([
+        { stream: "cmd", text: "$ POST /api/control/storm  n=" + r.n_fired + " distinct=" + r.distinct },
+        { stream: "out", text: JSON.stringify(r, null, 2) },
+      ], true);
+      renderStormResult(r);
+      toast(r.held ? "Storm held — one case, one live decision" : "Storm did NOT hold",
+        r.held ? "ok" : "err");
+      await refresh();
+    } catch (e) { toast(e.message, "err"); }
+    finally { btn.disabled = false; }
+  });
+
+  $("#run-inject").addEventListener("click", async () => {
+    const btn = $("#run-inject");
+    btn.disabled = true;
+    try {
+      const r = await post("/api/control/inject", {
+        category: $("#i-category").value, amount_rupees: Number($("#i-amount").value),
+      });
+      consoleWrite([
+        { stream: "cmd", text: "$ POST /api/control/inject  " + $("#i-category").value },
+        { stream: "out", text: JSON.stringify(r, null, 2) },
+      ], true);
+      $("#job-result").innerHTML = "";
+      await refresh();
+      if (r.case_id) { toast("Case opened — the file is on the right", "ok"); openCase(r.case_id); }
+      else toast("Event was " + r.status, "info");
+    } catch (e) { toast(e.message, "err"); }
+    finally { btn.disabled = false; }
+  });
+
+  $("#clear-console").addEventListener("click", () => {
+    $("#console").textContent = "";
+    $("#job-result").innerHTML = "";
+  });
+
+  refresh();
+}
+
+document.addEventListener("DOMContentLoaded", boot);

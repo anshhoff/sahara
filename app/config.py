@@ -78,6 +78,12 @@ RAZORPAY_KEY_ID = os.environ.get("RAZORPAY_KEY_ID", "")
 RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "")
 RAZORPAY_WEBHOOK_SECRET = os.environ.get("RAZORPAY_WEBHOOK_SECRET", "")
 LIVE_LINKS_MAX = int(_env("LIVE_LINKS_MAX", "5"))
+
+# The dashboard's control room runs the test suite, the batch and adversarial
+# storms in-process or as subprocesses. It is a demo surface on a single-operator
+# local app, and it is unauthenticated like the rest of the API, so it must be
+# switchable off in one place before this is ever bound to anything but localhost.
+CONTROL_ENABLED = _env_bool("CONTROL_API_ENABLED", True)
 MERCHANT_NAME = _env("MERCHANT_NAME", "Demo Subscriptions")
 
 # ------------------------------------------------------------------------ LLM

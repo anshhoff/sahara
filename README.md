@@ -209,6 +209,30 @@ LLM_PROVIDER=none uvicorn app.main:app --port 8000
 pytest -q
 ```
 
+### Or run all of it from the dashboard
+
+Every command above is also a button in the console's **Control room**
+(`http://localhost:8000/#/control`), which shells out to the *same* commands and streams
+their real output — nothing on that page is a replay of a result produced elsewhere.
+
+| Control | What it actually runs |
+|---|---|
+| Test suite | `python -m pytest tests -v`, with `LLM_PROVIDER=none` pinned so a run started from the browser is identical to one started from a terminal |
+| Replay the batch | `generate_synthetic.py` then `run_batch.py --holdout …` into a fresh `recovery.db`, then re-opens the server's connection to the new file |
+| Webhook storm | fires *n* simultaneous deliveries at the running server through `intake()` and checks the result: duplicate delivery must collapse to one case, a burst of distinct failures must still leave exactly one live decision |
+| Inject one failure | pushes a single signed-shape `payment.failed` body through `intake()` and opens the case file it produced |
+| Tick | runs one iteration of the loop instead of waiting out the 30s timer |
+
+`CONTROL_API_ENABLED=false` removes the whole router. It is unauthenticated, like the
+rest of this API, and belongs on localhost only.
+
+**One clock per row.** The background loop skips synthetic rows
+(`executor.tick(include_synthetic=False)`). A batch replay writes its cases against a
+*simulated* clock; to the live loop, on the wall clock, every one of them looks weeks old
+and therefore expired, so an unfiltered background tick would quietly close a finished
+experiment and report a batch that recovered nothing. Synthetic rows advance only under
+the clock that created them — the batch runner, or an operator pressing Tick.
+
 ### Environment variables
 
 | Variable | Required for | Where it comes from |
@@ -220,6 +244,7 @@ pytest -q
 | `DB_PATH` | Pointing at a scratch database | optional, defaults to `recovery.db` |
 | `LLM_COPY_ENABLED` | Kill-switch forcing static templates | optional, defaults to `true` |
 | `LIVE_LINKS_MAX` | Cap on real test-mode Payment Links | optional, defaults to `5` |
+| `CONTROL_API_ENABLED` | Dashboard control room (tests / batch / storms) | optional, defaults to `true`; set `false` for anything not on localhost |
 
 Never put live-mode keys anywhere in this project. `.env` is gitignored;
 `.env.example` holds placeholders only.
@@ -306,6 +331,27 @@ curl -s localhost:8000/api/metrics/trace/recovered
 
 Two consecutive clean-room runs on the same seed produce identical numbers; batch
 ordering is by insertion (`rowid`), never by a random id tail.
+
+### Adversarial cases (`tests/test_concurrency.py`)
+
+Idempotency is easy to claim and hard to hold under a real race, so it is tested as one.
+Every test below starts its workers on a barrier, because without it the threads stagger
+by their own creation cost and the interleaving under test never happens:
+
+| Test | The window it attacks |
+|---|---|
+| Ten identical webhooks | Razorpay retries on any non-2xx and can duplicate on its own. Ten simultaneous copies must produce one event, one case, one decision. |
+| Ten distinct events, one subscription | Every event is stored, but they are one recovery episode — two open cases would mean two independent attempt budgets aimed at one customer. |
+| Duplicate executor | The same scheduled decision picked up by ten workers. The conditional `UPDATE` that claims it is the only thing between this and ten Payment Links. |
+| Twenty threads, three attempt slots | `reserve_attempt()` is I1's real enforcement point; it must hand out exactly three. |
+| Crash between the side effect and its record | The intervention has already run against Razorpay and the process dies before the `ExecutionRecord` is written. The posture is deliberately **at-most-once**: on the next tick the decision is already claimed, so the crash costs an audit record — recoverable — instead of a second message to a customer, which is not. |
+| Orphan detection | An at-most-once system has to be able to find what it lost: one query surfaces every decision marked executed with no execution under it. |
+| Two clocks, one database | The background loop must not advance rows a batch replay wrote under a simulated clock. |
+
+The first of these found a real bug: `intake()` checked for a duplicate event id and then
+inserted, so two concurrent deliveries of one event both passed the check and the loser
+raised `IntegrityError` — a 500, which makes Razorpay redeliver. The event row is now
+written first, as the claim token, and a lost race is answered as a duplicate with a 200.
 
 ## Honest limits & out of scope (deliberate)
 

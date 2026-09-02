@@ -17,7 +17,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app import api, clock, config, db, executor, llm, webhooks
+from app import api, clock, config, control, db, executor, llm, webhooks
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("recovery-agent")
@@ -31,6 +31,9 @@ app = FastAPI(
     version="1.0",
 )
 app.include_router(api.router)
+if config.CONTROL_ENABLED:
+    # The dashboard's control room. Off in one place; see app/control.py.
+    app.include_router(control.router)
 
 _tick_task: asyncio.Task | None = None
 
@@ -39,7 +42,9 @@ async def _tick_loop() -> None:
     while True:
         try:
             await asyncio.sleep(TICK_INTERVAL_SECONDS)
-            result = await asyncio.to_thread(executor.tick)
+            # Synthetic rows are excluded: they belong to a batch replay that ran on a
+            # simulated clock, and this loop runs on the wall clock. See executor.tick().
+            result = await asyncio.to_thread(executor.tick, False)
             if result["executions"] or result["promises_lapsed"] or result["episodes_expired"]:
                 log.info(
                     "tick: %d executed, %d promises lapsed, %d episodes expired",

@@ -3,53 +3,130 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Recovery Agent — Console</title>
+<meta name="color-scheme" content="dark light">
+<title>Recovery Agent — Operator Console</title>
 <!--
-  Read-only operator console over the SQLite data (docs/06).
+  Operator console over the SQLite data (docs/06), plus a control room that runs the
+  suite, the batch and the adversarial storms without a terminal (app/control.py).
 
-  App shell: a fixed sidebar and one view at a time, routed on the URL hash. Each view
-  answers exactly one question, so nothing is a wall of scroll. The Mechanism views
-  render whatever /api/mechanism returns rather than restating the rules here — a gate
-  described in one place and enforced in another eventually describes something the
-  code no longer does.
+  App shell: a fixed rail and one view at a time, routed on the URL hash, so every view
+  is a shareable link. Each view answers exactly one question — nothing is a wall of
+  scroll. The Mechanism views render whatever /api/mechanism returns rather than
+  restating the rules here: a gate described in one place and enforced in another
+  eventually describes something the code no longer does.
 
-  Deliberate non-goals, do not add them: no auth, no realtime/polling, no build step,
-  no CDN, no webfont — the demo must survive a dead conference network. Charts are
-  hand-built divs, so there is no charting dependency.
+  Deliberate non-goals, do not add them: no auth, no build step, no CDN, no webfont —
+  the demo must survive a dead conference network. Charts are hand-built SVG, so there
+  is no charting dependency. Icons are an inline sprite, never emoji.
 -->
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+
+<!-- ============================================================ icon sprite -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <g id="i-overview" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/>
+      <rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>
+    </g>
+    <g id="i-impact" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3 17l5-5 4 3 6-7"/><path d="M14 8h4v4"/>
+    </g>
+    <g id="i-causes" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>
+    </g>
+    <g id="i-pipeline" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="5" cy="12" r="2"/><circle cx="19" cy="12" r="2"/><path d="M7 12h10"/>
+      <path d="M12 7v10"/>
+    </g>
+    <g id="i-shield" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 3l7 3v6c0 4.2-2.9 7.6-7 9-4.1-1.4-7-4.8-7-9V6z"/><path d="M9 12l2 2 4-4"/>
+    </g>
+    <g id="i-policy" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 9v12M15 9v12"/>
+    </g>
+    <g id="i-model" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 3l3.5 5.5L21 12l-5.5 3.5L12 21l-3.5-5.5L3 12l5.5-3.5z"/>
+    </g>
+    <g id="i-cases" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 6h16M4 12h16M4 18h10"/>
+    </g>
+    <g id="i-control" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/>
+      <circle cx="7" cy="18" r="2"/>
+    </g>
+    <g id="i-refresh" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M20 12a8 8 0 1 1-2.6-5.9"/><path d="M20 4v5h-5"/>
+    </g>
+    <g id="i-play" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M6 4l14 8-14 8z"/>
+    </g>
+    <g id="i-beaker" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 1.8 3h10.4a2 2 0 0 0 1.8-3l-5-9V3"/><path d="M7 15h10"/>
+    </g>
+    <g id="i-bolt" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M13 2L4 14h7l-1 8 9-12h-7z"/>
+    </g>
+    <g id="i-inject" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 3v12"/><path d="M8 11l4 4 4-4"/><path d="M4 20h16"/>
+    </g>
+    <g id="i-clock" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>
+    </g>
+    <g id="i-info" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>
+    </g>
+    <g id="i-warn" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17h.01"/>
+    </g>
+    <g id="i-check" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 12l5 5L20 6"/>
+    </g>
+    <g id="i-x" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M6 6l12 12M18 6L6 18"/>
+    </g>
+    <g id="i-theme" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="5"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"/>
+    </g>
+    <g id="i-arrow" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M5 12h14M13 6l6 6-6 6"/>
+    </g>
+    <g id="i-trace" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="11" cy="11" r="7"/><path d="M16 16l5 5"/>
+    </g>
+  </defs>
+</svg>
+
+<a class="skip-link" href="#scroll">Skip to content</a>
 
 <div class="app">
 
   <!-- ================================================================ rail -->
   <aside class="rail">
     <div class="brand">
-      <div class="mark">₹</div>
+      <div class="mark" aria-hidden="true">₹</div>
       <div>
         <div class="brand-name">Recovery Agent</div>
         <div class="brand-sub">Buildathon · Track 03</div>
       </div>
     </div>
 
-    <nav class="nav" id="nav">
+    <nav class="nav" id="nav" aria-label="Console sections">
       <div class="nav-group">Results</div>
-      <a href="#/overview"   data-view="overview"><span class="i">▤</span>Overview</a>
-      <a href="#/impact"     data-view="impact"><span class="i">◑</span>Impact
-        <em id="nav-impact"></em></a>
-      <a href="#/causes"     data-view="causes"><span class="i">▦</span>By failure cause</a>
+      <a href="#/overview" data-view="overview"><svg class="icon"><use href="#i-overview"/></svg>Overview</a>
+      <a href="#/impact"   data-view="impact"><svg class="icon"><use href="#i-impact"/></svg>Incremental impact<em id="nav-impact"></em></a>
+      <a href="#/causes"   data-view="causes"><svg class="icon"><use href="#i-causes"/></svg>By failure cause</a>
 
       <div class="nav-group">Mechanism</div>
-      <a href="#/pipeline"   data-view="pipeline"><span class="i">⇢</span>Pipeline</a>
-      <a href="#/guardrails" data-view="guardrails"><span class="i">⛊</span>Guardrails
-        <em id="nav-guards"></em></a>
-      <a href="#/policy"     data-view="policy"><span class="i">⊞</span>Decision policy</a>
-      <a href="#/model"      data-view="model"><span class="i">◇</span>Model boundary</a>
+      <a href="#/pipeline"   data-view="pipeline"><svg class="icon"><use href="#i-pipeline"/></svg>Pipeline</a>
+      <a href="#/guardrails" data-view="guardrails"><svg class="icon"><use href="#i-shield"/></svg>Guardrails<em id="nav-guards"></em></a>
+      <a href="#/policy"     data-view="policy"><svg class="icon"><use href="#i-policy"/></svg>Decision policy</a>
+      <a href="#/model"      data-view="model"><svg class="icon"><use href="#i-model"/></svg>Model boundary</a>
 
-      <div class="nav-group">Data</div>
-      <a href="#/cases"      data-view="cases"><span class="i">☰</span>Cases
-        <em id="nav-cases"></em></a>
+      <div class="nav-group">Operate</div>
+      <a href="#/cases"   data-view="cases"><svg class="icon"><use href="#i-cases"/></svg>Cases<em id="nav-cases"></em></a>
+      <a href="#/control" data-view="control"><svg class="icon"><use href="#i-control"/></svg>Control room<em id="nav-control"></em></a>
     </nav>
 
     <div class="rail-foot">
@@ -60,155 +137,275 @@
 
   <!-- ============================================================== main -->
   <div class="content">
-    <div class="topbar">
+    <header class="topbar">
       <div>
         <h1 id="view-title">Overview</h1>
         <p class="view-q" id="view-q"></p>
       </div>
       <div class="top-actions">
-        <button id="expand" class="ghost" type="button">Expand detail</button>
-        <button id="refresh" type="button">Refresh</button>
+        <button id="theme" class="btn icon-only ghost" type="button" title="Switch theme" aria-label="Switch colour theme">
+          <svg class="icon"><use href="#i-theme"/></svg>
+        </button>
+        <button id="tick" class="btn ghost" type="button" title="Run one iteration of the agent loop now">
+          <svg class="icon"><use href="#i-clock"/></svg>Tick
+        </button>
+        <button id="refresh" class="btn primary" type="button" title="Reload every panel (r)">
+          <svg class="icon"><use href="#i-refresh"/></svg>Refresh
+        </button>
       </div>
-    </div>
+    </header>
 
-    <div class="scroll" id="scroll">
-      <div id="banner" class="banner" role="note"></div>
+    <main class="scroll" id="scroll" tabindex="-1">
+      <div id="banner" class="banner" role="note">
+        <svg class="icon"><use href="#i-info"/></svg><span id="banner-text"></span>
+      </div>
 
       <!-- ------------------------------------------------------- overview -->
-      <div class="view" data-view="overview">
-        <div id="tiles" class="tiles" aria-label="Summary metrics"></div>
+      <section class="view" data-view="overview" aria-label="Overview">
+        <div id="tiles" class="tiles"></div>
         <div class="grid-2" style="margin-top:14px">
           <div class="panel">
-            <div class="panel-head"><h3>Where the money went</h3></div>
-            <div id="outcome-split"></div>
+            <div class="panel-head"><h2>Where every case ended</h2>
+              <span class="spacer"></span><span class="muted" id="outcome-n"></span></div>
+            <div class="panel-body" id="outcome-split"></div>
           </div>
           <div class="panel">
-            <div class="panel-head"><h3>Headline effect</h3>
-              <a class="link" href="#/impact">See the experiment →</a></div>
-            <div id="effect-mini"></div>
+            <div class="panel-head"><h2>Headline effect</h2>
+              <span class="spacer"></span><a class="link" href="#/impact">See the experiment →</a></div>
+            <div class="panel-body" id="effect-mini"></div>
           </div>
         </div>
-      </div>
+        <div class="panel">
+          <div class="panel-head"><h2>Loop, as row counts</h2>
+            <span class="spacer"></span><a class="link" href="#/pipeline">Open pipeline →</a></div>
+          <div class="panel-body"><div class="flow" id="flow-mini"></div></div>
+        </div>
+      </section>
 
       <!-- --------------------------------------------------------- impact -->
-      <div class="view" data-view="impact">
+      <section class="view" data-view="impact" aria-label="Incremental impact">
         <p class="lede">
           Gross recovery cannot separate money the agent won from money that would have come back
           anyway — some failed charges recover on their own when a customer tops up or an issuer stops
-          declining. A randomised slice of cases is therefore held out: detected and diagnosed like any
-          other, then never intervened on. The gap between the arms is the agent's effect.
+          declining. A randomised slice of cases is therefore <em>held out</em>: detected and diagnosed
+          like any other, then never intervened on. The gap between the arms is the agent's effect.
         </p>
         <div class="panel" id="effect-panel"></div>
-      </div>
+      </section>
 
       <!-- --------------------------------------------------------- causes -->
-      <div class="view" data-view="causes">
+      <section class="view" data-view="causes" aria-label="By failure cause">
         <p class="lede">Not every failure is equally recoverable. An expired card does not un-expire;
           an empty account often refills by payday.</p>
         <div class="panel">
+          <div class="panel-head"><h2>Recovery by diagnosed cause</h2></div>
           <table id="categories" class="grid">
             <thead>
               <tr>
                 <th>Cause</th><th class="num">Cases</th><th class="num">Recovered</th>
-                <th class="num">Rate</th><th class="num">₹ recovered</th>
-                <th class="num">Stopped</th><th class="bar-col">Recovery rate</th>
+                <th class="num">Rate</th><th class="num">₹ at risk</th><th class="num">₹ recovered</th>
+                <th class="bar-col">Recovery rate</th>
               </tr>
             </thead>
             <tbody></tbody>
           </table>
         </div>
-      </div>
+      </section>
 
       <!-- ------------------------------------------------------- pipeline -->
-      <div class="view" data-view="pipeline">
+      <section class="view" data-view="pipeline" aria-label="Pipeline">
         <p class="lede">
           Every number here is a row count in the database. Two gates sit inside the loop — one before a
           decision is made, one immediately before it executes — because state can change in between.
         </p>
-        <div class="panel"><div class="flow" id="flow"></div></div>
-      </div>
+        <div class="panel"><div class="panel-body"><div class="flow" id="flow"></div></div></div>
+        <div class="panel" id="funnel-notes"></div>
+      </section>
 
       <!-- ----------------------------------------------------- guardrails -->
-      <div class="view" data-view="guardrails">
+      <section class="view" data-view="guardrails" aria-label="Guardrails">
         <p class="lede">
           Four invariants, enforced in a module that imports neither the policy table nor the model — so a
           wrong policy cell cannot route around them and no model output can reach them. They run before a
           decision <em>and</em> again before execution. The counts are live.
         </p>
         <div class="guards" id="guards"></div>
-      </div>
+      </section>
 
       <!-- --------------------------------------------------------- policy -->
-      <div class="view" data-view="policy">
+      <section class="view" data-view="policy" aria-label="Decision policy">
         <p class="lede">
           The intervention comes from a static table indexed by <code>(failure cause, attempt number)</code>.
           It is total — every cell filled — so the lookup cannot fall through to a default, and every
           decision records the exact cell it came from.
         </p>
         <div class="panel">
-          <div class="panel-head"><h3>Policy table</h3><span class="muted" id="policy-note"></span></div>
-          <div style="overflow-x:auto"><table class="matrix" id="policy"></table></div>
-          <div class="legend" id="policy-legend"></div>
+          <div class="panel-head"><h2>Policy table</h2><span class="spacer"></span>
+            <span class="muted" id="policy-note"></span></div>
+          <div class="panel-body" style="overflow-x:auto"><table class="matrix" id="policy"></table>
+            <div class="legend" id="policy-legend"></div></div>
         </div>
         <div class="panel">
-          <div class="panel-head"><h3>Diagnosis rules</h3>
+          <div class="panel-head"><h2>Diagnosis rules</h2><span class="spacer"></span>
             <span class="muted">Rules first; the model sees only what they miss.</span></div>
           <table class="grid" id="rules">
             <thead><tr><th>Rule</th><th>Resolves to</th><th class="num">Matched</th><th>Patterns</th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
-      </div>
+      </section>
 
       <!-- ---------------------------------------------------------- model -->
-      <div class="view" data-view="model">
+      <section class="view" data-view="model" aria-label="Model boundary">
         <p class="lede">Where the model is — and, more importantly, where it is not.</p>
-        <div class="panel"><div id="boundary"></div></div>
-      </div>
+        <div id="boundary"></div>
+      </section>
 
       <!-- ---------------------------------------------------------- cases -->
-      <div class="view" data-view="cases">
+      <section class="view" data-view="cases" aria-label="Cases">
         <div class="panel">
           <div class="panel-head">
-            <div class="filters">
-              <label>Status <select id="f-status"><option value="">all</option></select></label>
-              <label>Cause <select id="f-category"><option value="">all</option></select></label>
-              <label>Arm <select id="f-arm">
+            <label class="dim">Status
+              <select id="f-status"><option value="">all</option></select></label>
+            <label class="dim">Cause
+              <select id="f-category"><option value="">all</option></select></label>
+            <label class="dim">Arm
+              <select id="f-arm">
                 <option value="">all</option><option value="treated">treated</option>
                 <option value="control">control</option>
               </select></label>
-              <input id="f-text" type="search" placeholder="search id or subscription…">
-            </div>
+            <input id="f-text" type="search" placeholder="Search case or subscription id…"
+                   aria-label="Search cases by id">
+            <span class="spacer"></span>
             <span id="case-count" class="muted"></span>
           </div>
-          <table id="cases-table" class="grid clickable">
-            <thead>
-              <tr>
-                <th>Case</th><th>Subscription</th><th>Cause</th><th class="num">Amount</th>
-                <th>Attempts</th><th>Status</th><th>Arm</th><th>Data</th><th>Updated</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
+          <div class="table-wrap">
+            <table id="cases-table" class="grid clickable">
+              <thead>
+                <tr>
+                  <th class="sortable" data-sort="case_id" aria-sort="none">Case</th>
+                  <th class="sortable" data-sort="subscription_id" aria-sort="none">Subscription</th>
+                  <th class="sortable" data-sort="category" aria-sort="none">Cause</th>
+                  <th class="sortable num" data-sort="amount_rupees" aria-sort="none">Amount</th>
+                  <th class="sortable num" data-sort="attempt_count" aria-sort="none">Att.</th>
+                  <th class="sortable" data-sort="status" aria-sort="none">Status</th>
+                  <th class="sortable" data-sort="is_holdout" aria-sort="none">Arm</th>
+                  <th class="sortable" data-sort="synthetic" aria-sort="none">Data</th>
+                  <th class="sortable" data-sort="updated_at" aria-sort="descending">Updated</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
         </div>
         <p class="foot-note">
           A stopped case is a deliverable, not a failure — the case file is the artifact a human picks up.
           Every number on this page is a SQL query over <code>recovery.db</code>; trace one with
           <code>GET /api/metrics/trace/recovered</code>.
         </p>
-      </div>
-    </div>
+      </section>
+
+      <!-- -------------------------------------------------------- control -->
+      <section class="view" data-view="control" aria-label="Control room">
+        <p class="lede">
+          Everything this project can do from a terminal, it does from here. These buttons shell out to
+          the <em>same</em> commands — <code>pytest</code>, <code>generate_synthetic.py</code>,
+          <code>run_batch.py</code> — and stream their real output below, so nothing shown here is a
+          rehearsal of a result produced somewhere else.
+        </p>
+        <div class="actions" id="actions">
+
+          <div class="action">
+            <h4><svg class="icon"><use href="#i-beaker"/></svg>Test suite</h4>
+            <p>The full suite, including the adversarial concurrency file: duplicate delivery, duplicate
+              executor, and a crash between an irreversible side effect and its record.</p>
+            <div class="row">
+              <select id="test-file" aria-label="Test file to run"><option value="">whole suite</option></select>
+              <button class="btn primary" id="run-tests" type="button">
+                <svg class="icon"><use href="#i-play"/></svg>Run
+              </button>
+            </div>
+            <div class="cmd" id="cmd-tests">python -m pytest tests -v</div>
+          </div>
+
+          <div class="action">
+            <h4><svg class="icon"><use href="#i-refresh"/></svg>Replay the batch</h4>
+            <p>Regenerates the seeded cases and replays every one through the real pipeline against a
+              fresh database. This is the README's reproduce command, verbatim.</p>
+            <div class="row">
+              <label>cases <input id="b-n" type="number" value="80" min="10" max="400" step="10"></label>
+              <label>seed <input id="b-seed" type="number" value="42"></label>
+              <label>holdout <input id="b-holdout" type="number" value="0.35" min="0" max="0.6" step="0.05"></label>
+              <button class="btn primary" id="run-batch" type="button">
+                <svg class="icon"><use href="#i-play"/></svg>Replay
+              </button>
+            </div>
+            <div class="cmd" id="cmd-batch"></div>
+          </div>
+
+          <div class="action">
+            <h4><svg class="icon"><use href="#i-bolt"/></svg>Webhook storm</h4>
+            <p>Fires n deliveries simultaneously at the running server. Duplicate delivery must collapse
+              to one case; a burst of distinct failures on one subscription must still leave exactly one
+              live decision.</p>
+            <div class="row">
+              <label>n <input id="s-n" type="number" value="10" min="2" max="50"></label>
+              <label>mode <select id="s-mode">
+                <option value="dup">identical event ×n</option>
+                <option value="distinct">n distinct events</option>
+              </select></label>
+              <button class="btn primary" id="run-storm" type="button">
+                <svg class="icon"><use href="#i-play"/></svg>Fire
+              </button>
+            </div>
+            <div class="cmd">POST /api/control/storm</div>
+          </div>
+
+          <div class="action">
+            <h4><svg class="icon"><use href="#i-inject"/></svg>Inject one failure</h4>
+            <p>Pushes a single Razorpay <code>payment.failed</code> body through <code>intake()</code> —
+              the same function the live webhook calls — and opens the case file it produced.</p>
+            <div class="row">
+              <select id="i-category" aria-label="Failure cause to inject"></select>
+              <label>₹ <input id="i-amount" type="number" value="499" min="1" step="1"></label>
+              <button class="btn primary" id="run-inject" type="button">
+                <svg class="icon"><use href="#i-play"/></svg>Inject
+              </button>
+            </div>
+            <div class="cmd">POST /api/control/inject</div>
+          </div>
+        </div>
+
+        <div class="panel" style="margin-top:14px">
+          <div class="panel-head">
+            <h2>Console</h2>
+            <span class="badge" id="job-status">idle</span>
+            <span class="muted" id="job-label"></span>
+            <span class="spacer"></span>
+            <span class="muted" id="job-elapsed"></span>
+            <button class="btn ghost" id="clear-console" type="button">Clear</button>
+          </div>
+          <pre class="console" id="console" aria-live="polite" aria-label="Command output"><span class="console-empty">No run yet. Pick an action above — output streams here as it happens.</span></pre>
+          <div id="job-result"></div>
+        </div>
+      </section>
+    </main>
   </div>
 </div>
 
 <div class="drawer-back" id="drawer-back"></div>
-<aside class="drawer" id="drawer" aria-label="Case file">
+<aside class="drawer" id="drawer" role="dialog" aria-modal="true"
+       aria-labelledby="drawer-title" aria-hidden="true">
   <div class="drawer-head">
-    <h2>Case file <span id="detail-id" class="mono muted"></span></h2>
-    <button id="close-detail" type="button">Close</button>
+    <h2 id="drawer-title">Case file <span id="detail-id" class="mono muted"></span></h2>
+    <button id="close-detail" class="btn ghost" type="button">
+      <svg class="icon"><use href="#i-x"/></svg>Close
+    </button>
   </div>
   <div class="drawer-body" id="detail-body"></div>
 </aside>
+
+<div class="toasts" id="toasts" role="status" aria-live="polite" aria-atomic="false"></div>
 
 <script src="app.js"></script>
 </body>

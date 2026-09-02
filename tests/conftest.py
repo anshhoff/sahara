@@ -12,9 +12,18 @@ import pytest
 os.environ.setdefault("LLM_PROVIDER", "none")  # tests never call a model by default
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import clock, db  # noqa: E402
+from app import clock, db, executor  # noqa: E402
 
 T0 = datetime(2026, 3, 2, 9, 0, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def no_live_calls():
+    """No test may spend a real test-mode Payment Link. The budget is process-global,
+    so a single test that forgot would quietly burn the account's rate limit for every
+    run after it."""
+    executor.set_live_link_budget(0)
+    yield
 
 
 @pytest.fixture()
