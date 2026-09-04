@@ -139,7 +139,14 @@ TERMINAL_STATUSES = tuple(s for s in CASE_STATUSES if s != "open")
 STOPPED_STATUSES = tuple(s for s in CASE_STATUSES if s.startswith("stopped_"))
 
 FAILURE_EVENT_TYPES = ("payment.failed", "subscription.pending", "subscription.halted")
-RECOVERY_EVENT_TYPES = ("subscription.charged", "payment_link.paid")
+# `order.paid` is here because of a hard test-mode ceiling, not a design preference:
+# a test-mode account may create only 30 Payment Links, ever, and this account has
+# spent all 30 (see UPDATE_LINK_MODE). Orders have no such ceiling, so the update-link
+# rung falls back to a real Order + hosted Checkout, whose recovery signal arrives as
+# `order.paid` rather than `payment_link.paid`. Same money, same case, different event
+# name — `webhooks.extract()` already recovers the case from `notes.case_id`, which
+# Razorpay copies from the order onto the payment.
+RECOVERY_EVENT_TYPES = ("subscription.charged", "payment_link.paid", "order.paid")
 
 # ------------------------------------------------------------------- database
 DB_PATH = _env("DB_PATH", str(ROOT / "recovery.db"))
@@ -150,6 +157,32 @@ RAZORPAY_KEY_ID = os.environ.get("RAZORPAY_KEY_ID", "")
 RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "")
 RAZORPAY_WEBHOOK_SECRET = os.environ.get("RAZORPAY_WEBHOOK_SECRET", "")
 LIVE_LINKS_MAX = int(_env("LIVE_LINKS_MAX", "5"))
+
+# Which surface SEND_UPDATE_LINK uses to produce something the customer can actually pay.
+#
+#   payment_link — Razorpay Payment Links. The nicest artefact (hosted page, short_url)
+#                  and the one that runs out: test mode caps an account at 30 for the
+#                  lifetime of the key, after which every create returns
+#                  `ServerError: test mode limit of 30 reached for payment_link` and the
+#                  executor honestly records a `https://example.invalid/...` stand-in.
+#   order        — a real Order plus the console's own /pay page running Razorpay
+#                  Checkout. No ceiling; payable in test mode with `success@razorpay`.
+#   auto         — try Payment Links while budget and quota last, fall back to Order,
+#                  fall back to the simulated stand-in. The default, because a demo
+#                  should degrade to something payable before it degrades to a fiction.
+#
+# The fallback ladder never silently upgrades honesty: whichever rung produced the URL
+# is recorded as the execution `mode`, and the console renders the difference.
+UPDATE_LINK_MODE = _env("UPDATE_LINK_MODE", "auto")
+
+# The Order rung's own budget. Separate from LIVE_LINKS_MAX and larger, because the two
+# rungs consume different resources: Payment Links are the thing an account runs out of
+# permanently, Orders are ordinary rate-limited API calls. Both are still real calls on
+# a real key, so both are budgeted and both are zeroed in tests.
+LIVE_ORDERS_MAX = int(_env("LIVE_ORDERS_MAX", "50"))
+
+# Where the console is served from, so an Order-backed link points at a page that exists.
+PUBLIC_BASE_URL = _env("PUBLIC_BASE_URL", "http://localhost:3000").rstrip("/")
 
 # The dashboard's control room runs the test suite, the batch and adversarial
 # storms in-process or as subprocesses. It is a demo surface on a single-operator

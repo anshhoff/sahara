@@ -23,6 +23,12 @@ log = logging.getLogger(__name__)
 # runner lowers or raises it with --live-links; everything above the cap is simulated
 # and recorded honestly as such.
 _live_link_budget = config.LIVE_LINKS_MAX
+# The update-link ladder's second rung has a budget of its own. It has to: a Payment
+# Link is a resource the account exhausts for good, an Order is an ordinary rate-limited
+# call, and spending them from one counter would either strand the cheap rung or
+# over-spend the scarce one. Both are live calls on a live key, so both are budgeted,
+# and `tests/conftest.py` zeroes both.
+_live_order_budget = config.LIVE_ORDERS_MAX
 _razorpay_client: Any = None
 
 
@@ -33,6 +39,15 @@ def set_live_link_budget(n: int) -> None:
 
 def live_link_budget() -> int:
     return _live_link_budget
+
+
+def set_live_order_budget(n: int) -> None:
+    global _live_order_budget
+    _live_order_budget = max(0, int(n))
+
+
+def live_order_budget() -> int:
+    return _live_order_budget
 
 
 def razorpay_client():
@@ -237,16 +252,107 @@ def _create_payment_link(case: dict[str, Any], description: str) -> tuple[Option
         return None, None, {"error": f"{type(exc).__name__}: {exc}"}
 
 
+def _create_checkout_order(case: dict[str, Any]) -> tuple[Optional[str], Optional[str], dict[str, Any]]:
+    """The second rung of the update-link ladder: a real test-mode Order, paid through
+    the console's own /pay page rather than a Razorpay-hosted one.
+
+    This exists because Payment Links are the capped resource and Orders are not. A
+    test-mode account gets 30 Payment Links for the life of the key and no more; past
+    that every create returns `test mode limit of 30 reached for payment_link` and the
+    rung above can only produce a stand-in. The same key keeps creating Orders. The
+    money, the test-mode rails and the resulting webhook are all equally real — what is
+    missing is Razorpay's hosted page, which the console's /pay replaces with Checkout.
+
+    `notes.case_id` is the point of the call: Razorpay copies an order's notes onto the
+    payment it produces, which is how `webhooks.extract()` reads the resulting
+    `order.paid` back to this exact case — the same trick live_demo.py uses on the way in.
+
+    Nothing is sent to anybody here either. An Order is inert until someone opens it.
+    """
+    global _live_order_budget
+    if _live_order_budget <= 0 or not razorpay_configured():
+        return None, None, {"skipped": "live order budget exhausted or Razorpay not configured"}
+    try:
+        # Spent before the call and never refunded, for the same fail-closed reason the
+        # Payment Link budget is: a refund on error turns a persistently failing
+        # endpoint into an unbounded retry loop.
+        _live_order_budget -= 1
+        resp = razorpay_client().order.create(
+            {
+                "amount": int(case["amount_at_risk_paise"]),
+                "currency": case["currency"],
+                "notes": {
+                    "case_id": case["id"],
+                    "case_source": "update-link",
+                    "synthetic": str(bool(case["synthetic"])).lower(),
+                },
+            }
+        )
+        order_id = resp.get("id")
+        if not order_id:
+            return None, None, {"error": "order.create returned no id"}
+        url = f"{config.PUBLIC_BASE_URL}/pay?order_id={order_id}&case_id={case['id']}"
+        return order_id, url, resp
+    except Exception as exc:
+        log.warning("Checkout Order creation failed for case %s: %s", case["id"], exc)
+        return None, None, {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def _update_link_surface(
+    case: dict[str, Any], description: str
+) -> tuple[str, str, Optional[str], str, dict[str, Any]]:
+    """Produce the best payable URL this account can still produce, and say which it is.
+
+    Returns `(mode, surface, razorpay_ref, url, payload)`. The ladder descends in
+    realism and never climbs back: Payment Link -> Order + Checkout -> a stand-in URL
+    that goes nowhere. Each rung records why it was reached, because the difference
+    between "a customer could pay this" and "this is a placeholder" is the one thing
+    about an execution record a reader cannot afford to have smoothed over.
+
+    `mode` stays the two-valued answer it has always been — did a real test-mode call
+    happen, or not — because that is what the schema CHECK constrains and what
+    `metrics.execution_modes()` buckets on. Both live rungs are equally real Razorpay
+    calls on the same key; `surface` carries which endpoint served it, in the payload
+    where a new value costs nobody a migration.
+    """
+    attempts: dict[str, Any] = {}
+    want = config.UPDATE_LINK_MODE
+
+    if want in ("auto", "payment_link"):
+        link_id, short_url, payload = _create_payment_link(case, description)
+        if link_id and short_url:
+            return "razorpay_test", "payment_link", link_id, short_url, payload
+        attempts["payment_link"] = payload
+        if want == "payment_link":
+            return "simulated", "none", None, _simulated_link(case), payload
+
+    if want in ("auto", "order"):
+        order_id, url, payload = _create_checkout_order(case)
+        if order_id and url:
+            # Carry the Payment Link's refusal forward. An operator reading this record
+            # should see that the better rung was tried and why it failed, not merely
+            # that an Order happened to be the thing that got created.
+            return "razorpay_test", "checkout_order", order_id, url, (
+                {**payload, "fell_back_from": attempts} if attempts else payload
+            )
+        attempts["order"] = payload
+
+    return (
+        "simulated",
+        "none",
+        None,
+        _simulated_link(case),
+        attempts or {"skipped": f"UPDATE_LINK_MODE={want} permits no live surface"},
+    )
+
+
 def send_update_link(case: dict[str, Any], action: str = "SEND_UPDATE_LINK") -> dict[str, Any]:
-    """Create (optionally real) a Payment Link and log a simulated notification."""
+    """Create a payable link and log a simulated notification. Nothing is transmitted."""
     description = (
         f"{config.SYNTHETIC_DISCLOSURE} Update payment for subscription "
         f"{case['subscription_id']} — Rs {_amount_str(case)}"
     )
-    link_id, short_url, payload = _create_payment_link(case, description)
-
-    mode = "razorpay_test" if link_id else "simulated"
-    url = short_url or _simulated_link(case)
+    mode, surface, link_id, url, payload = _update_link_surface(case, description)
 
     text, copy_source, validation = build_copy(case, action)
     message = inject_link(text, url)
@@ -262,6 +368,9 @@ def send_update_link(case: dict[str, Any], action: str = "SEND_UPDATE_LINK") -> 
         "result_payload": {
             "action": "send_update_link" if action == "SEND_UPDATE_LINK" else "send_promise_offer",
             "link_url": url,
+            # Which Razorpay surface produced link_url: a hosted Payment Link, an Order
+            # the console's /pay page opens in Checkout, or nothing at all.
+            "link_surface": surface,
             "notification": "SIMULATED — composed and logged, never transmitted",
             "razorpay_response": payload,
         },
@@ -310,6 +419,28 @@ def voice_script(case: dict[str, Any], language: Optional[str] = None) -> tuple[
     return render_slots(skeleton, case), language
 
 
+def _link_already_sent(case: dict[str, Any]) -> Optional[str]:
+    """The most recent payable URL this case was actually given, if any.
+
+    A voice call is a follow-up, not a fresh offer: reading out a *second* link when
+    the customer already has one in an SMS is how a recovery flow teaches people to
+    ignore both. Reusing the sent link also keeps this rung from spending a Payment
+    Link or an Order of its own, which matters on an account whose live budget is the
+    scarce thing (see `_update_link_surface`).
+    """
+    for row in db.query(
+        "SELECT result_payload FROM execution_record WHERE case_id = ? ORDER BY rowid DESC",
+        (case["id"],),
+    ):
+        try:
+            url = (json.loads(row["result_payload"] or "{}") or {}).get("link_url")
+        except (TypeError, ValueError):
+            continue
+        if url:
+            return str(url)
+    return None
+
+
 def place_voice_call(case: dict[str, Any]) -> dict[str, Any]:
     """Escalation rung 3: a call, before a person.
 
@@ -323,7 +454,7 @@ def place_voice_call(case: dict[str, Any]) -> dict[str, Any]:
     tracked promise. Nothing the customer says can name an amount; there is no field.
     """
     script, language = voice_script(case)
-    url = _simulated_link(case)
+    url = _link_already_sent(case) or _simulated_link(case)
     message = inject_link(script, url)
 
     verified = invariants.verified_recipient(case)

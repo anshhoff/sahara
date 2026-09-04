@@ -133,6 +133,11 @@ class Runner:
         self._transcript_weights = [w for w, _ in VOICE_TRANSCRIPTS]
         executor.set_transcript_provider(self.transcript_for)
         executor.set_live_link_budget(live_links)
+        # The batch is an experiment, not a demo, and its reported numbers must not
+        # depend on whether an API call happened to succeed that afternoon. `--live-links`
+        # is the one deliberate exception and it governs Payment Links only; the Order
+        # rung stays off, so a replay of the same seed reaches the same execution modes.
+        executor.set_live_order_budget(0)
 
     # ------------------------------------------------------------------- voice
     def transcript_for(self, case: dict[str, Any]) -> str:
