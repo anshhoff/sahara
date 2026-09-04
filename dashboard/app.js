@@ -1,5 +1,5 @@
 /* =============================================================================
-   Recovery Agent — operator console
+   Sahara — operator console
    -----------------------------------------------------------------------------
    One file, no build step, no dependencies. Structure:
 
@@ -117,17 +117,48 @@ function toastOnce(key, text, kind) {
 }
 
 /* ------------------------------------------------------------------ views */
+/* Five destinations. Where two pages answered halves of one question they became
+   tabs inside a single view, addressed as #/view:tab — so the URL still points at
+   exactly what is on screen, and the rail stays short enough to read at a glance.
+   Each entry carries the one question its view answers; the topbar prints it. */
 const VIEWS = {
-  overview:   { title: "Overview", q: "Did this recover money, and where did every case end up?" },
-  impact:     { title: "Incremental impact", q: "How much of the recovery would not have happened anyway?" },
-  causes:     { title: "By failure cause", q: "Which failures are actually recoverable?" },
-  pipeline:   { title: "Pipeline", q: "What did the loop do, counted in rows?" },
-  guardrails: { title: "Guardrails", q: "What can this agent never do, and how often did that bind?" },
-  policy:     { title: "Decision policy", q: "How is the single intervention chosen?" },
-  model:      { title: "Model boundary", q: "Where is the model — and where is it not?" },
-  cases:      { title: "Cases", q: "Every case, and the complete file behind any one of them." },
-  control:    { title: "Control room", q: "Run the suite, replay the batch, and attack the running server." },
+  overview:  {
+    title: "Overview",
+    q: "Did this recover money, and where did every case end up?",
+  },
+  results:   {
+    title: "Results",
+    subs: {
+      impact: { title: "Incremental impact",
+                q: "How much of the recovery would not have happened anyway?" },
+      causes: { title: "By failure cause", q: "Which failures are actually recoverable?" },
+    },
+  },
+  mechanism: {
+    title: "How it works",
+    subs: {
+      pipeline:   { title: "Pipeline", q: "What did the loop do, counted in rows?" },
+      guardrails: { title: "Guardrails",
+                    q: "What can this agent never do, and how often did that bind?" },
+      policy:     { title: "Decision policy", q: "How is the single intervention chosen?" },
+      model:      { title: "Model boundary", q: "Where is the model — and where is it not?" },
+    },
+  },
+  cases:     {
+    title: "Cases",
+    q: "Every case, and the complete file behind any one of them.",
+  },
+  control:   {
+    title: "Control room",
+    q: "Run the suite, replay the batch, and attack the running server.",
+  },
+  livedemo:  {
+    title: "Test mode",
+    q: "Fail a real Razorpay payment and watch the pipeline react live.",
+  },
 };
+
+const firstSub = (name) => Object.keys(VIEWS[name].subs || {})[0] || null;
 
 /* ============================================================== rendering */
 
@@ -159,9 +190,9 @@ function renderChips() {
 
   $("#nav-cases").textContent = state.cases.length ? state.cases.length : "";
   const guards = state.mechanism ? state.mechanism.invariants.reduce((a, i) => a + i.stops, 0) : 0;
-  $("#nav-guards").textContent = guards ? guards + " stops" : "";
+  $("#nav-mechanism").textContent = guards ? guards + " stops" : "";
   const inc = s.incremental;
-  $("#nav-impact").textContent = inc && inc.available ? pct(inc.lift, 0) : "";
+  $("#nav-results").textContent = inc && inc.available ? pct(inc.lift, 0) + " lift" : "";
 }
 
 function renderBanner() {
@@ -189,6 +220,7 @@ function renderOverview() {
   if (!s) return;
   const rate = s.recovery_rate || {};
   const inc = s.incremental || {};
+  const net = s.net || {};
 
   const tiles = [
     { k: "₹ at risk", v: rupees2(s.total_at_risk_rupees), cls: "",
@@ -203,6 +235,11 @@ function renderOverview() {
         ? "vs a " + ((inc.control && inc.control.n) || 0) + "-case untouched control arm" +
           (inc.significant ? " · significant" : " · not significant")
         : "no control arm in this run" },
+    { k: "Net of cost", v: net.incremental_available
+        ? rupees(net.net_incremental_paise) : rupees(net.net_recovered_paise), cls: "control",
+      s: net.incremental_available
+        ? "incremental recovery minus every rupee spent to get it"
+        : "gross recovery minus " + rupees(net.total_cost_paise) + " of outreach and handoff" },
     { k: "Avg time to recovery", v: hours(s.avg_time_to_recovery_hours), cls: "",
       s: esc(s.time_basis || "") },
     { k: "Stopped", v: String((s.stopped && s.stopped.total) || 0), cls: "warn",
@@ -295,7 +332,45 @@ function renderImpact() {
   el.innerHTML =
     '<div class="panel-head"><h2>Treated vs control</h2><span class="spacer"></span>' +
       '<span class="muted">randomised at intake, assignment travels with the event</span></div>' +
-    '<div class="panel-body">' + armsHtml(inc, false) + "</div>";
+    '<div class="panel-body">' + armsHtml(inc, false) + netHtml() + "</div>";
+}
+
+/* The number the project actually stands behind: money that came back BECAUSE of the
+   agent, minus everything the agent spent to get it. Rendered from /api/summary; the
+   arithmetic lives in metrics.net_recovery() and is never restated here. */
+function netHtml() {
+  const net = (state.summary && state.summary.net) || {};
+  const costs = (state.summary && state.summary.costs) || {};
+  if (net.gross_recovered_paise === undefined) return "";
+  const row = (k, v, sub, cls) =>
+    '<div class="net-row ' + (cls || "") + '">' +
+      '<span class="net-k">' + esc(k) + "</span>" +
+      '<span class="net-v">' + esc(v) + "</span>" +
+      '<span class="net-s">' + esc(sub) + "</span>" +
+    "</div>";
+  const lines = [
+    row("Gross recovered", rupees(net.gross_recovered_paise), "every rupee that came back", ""),
+    row("Outreach", "− " + rupees(costs.outreach_paise),
+        (costs.by_action && costs.by_action.SEND_UPDATE_LINK
+          ? costs.by_action.SEND_UPDATE_LINK.n : 0) + " links, " +
+        (costs.by_action && costs.by_action.PROMISE_TO_PAY
+          ? costs.by_action.PROMISE_TO_PAY.n : 0) + " promises · silent retries cost nothing", "cost"),
+    row("Human queue", "− " + rupees(costs.handoff_paise),
+        (costs.n_handoff_cases || 0) + " cases handed to a person", "cost"),
+    row("Net recovered", rupees(net.net_recovered_paise),
+        net.cost_per_100_recovered === null ? "nothing recovered yet"
+          : "₹" + net.cost_per_100_recovered + " spent per ₹100 recovered", "total"),
+  ];
+  if (net.incremental_available) {
+    const ci = net.net_incremental_paise_ci95 || [0, 0];
+    lines.push(row("Net incremental", rupees(net.net_incremental_paise),
+      "attributable to the agent, after costs · 95% CI [" +
+      rupees(ci[0]) + ", " + rupees(ci[1]) + "]", "total accent"));
+  }
+  return '<div class="net-block"><h3>Net of what it cost</h3>' + lines.join("") +
+    '<p class="foot-note">Gross recovery cannot go down by sending more messages, which ' +
+    "is what makes it the wrong headline. The modelled annoyance cost prices each " +
+    "decision but is never booked here — only rupees that actually moved are.</p></div>";
 }
 
 /* ---------------------------------------------------------------- causes */
@@ -368,8 +443,9 @@ function renderGuards() {
   $("#guards").innerHTML = m.invariants.map((i) =>
     '<div class="guard">' +
       '<div class="guard-head">' +
-        '<span class="guard-code">' + esc(i.code) + "</span>" +
+        '<span class="guard-code ' + esc(i.kind || "") + '">' + esc(i.code) + "</span>" +
         "<h4>" + esc(i.title) + "</h4>" +
+        '<span class="guard-kind">' + esc(words(i.kind || "safety")) + "</span>" +
         '<span class="counts">' +
           '<span class="badge ' + (i.stops ? "danger" : "") + '">' + i.stops +
             " stop" + (i.stops === 1 ? "" : "s") + "</span>" +
@@ -716,6 +792,15 @@ function renderControlStatics() {
     cat.innerHTML = c.categories.map((k) =>
       '<option value="' + esc(k) + '">' + esc(words(k)) + "</option>").join("");
   }
+  const livedemoCat = $("#livedemo-category");
+  if (livedemoCat && !livedemoCat.options.length && c.categories) {
+    c.categories.forEach((k) => {
+      const opt = document.createElement("option");
+      opt.value = k;
+      opt.textContent = words(k);
+      livedemoCat.appendChild(opt);
+    });
+  }
   updateCommands();
   if (!c.enabled) {
     $$("#actions button").forEach((b) => { b.disabled = true; });
@@ -909,14 +994,32 @@ async function refresh() {
 }
 
 /* ================================================================ router */
+/* "#/mechanism:policy" -> view "mechanism", tab "policy". An unknown view or tab
+   falls back to the first valid one rather than rendering a blank shell. */
 function route() {
-  const hash = location.hash.replace(/^#\/?/, "") || "overview";
-  const name = VIEWS[hash] ? hash : "overview";
+  const parts = location.hash.replace(/^#\/?/, "").split(":");
+  const name = VIEWS[parts[0]] ? parts[0] : "overview";
+  const subs = VIEWS[name].subs;
+  const sub = subs ? (subs[parts[1]] ? parts[1] : firstSub(name)) : null;
+  const leaf = sub ? subs[sub] : VIEWS[name];
+
   $$(".view").forEach((v) => v.classList.toggle("on", v.dataset.view === name));
   $$("#nav a").forEach((a) => a.classList.toggle("on", a.dataset.view === name));
-  $("#view-title").textContent = VIEWS[name].title;
-  $("#view-q").textContent = VIEWS[name].q;
-  document.title = VIEWS[name].title + " — Recovery Agent";
+
+  const bar = $('.subnav[data-sub-for="' + name + '"]');
+  if (bar) {
+    $$("a", bar).forEach((a) => a.classList.toggle("on", a.dataset.sub === sub));
+    $$('.view[data-view="' + name + '"] > .subview').forEach((v) =>
+      v.classList.toggle("on", v.dataset.sub === sub));
+  }
+
+  // A case file left hanging over a view it does not belong to reads as part of that
+  // view. Navigating away closes it.
+  closeCase();
+
+  $("#view-title").textContent = leaf.title;
+  $("#view-q").textContent = leaf.q;
+  document.title = leaf.title + " — Sahara";
   // Screen readers otherwise stay parked wherever the old view was; only move focus on
   // a real navigation, never on the initial render.
   if (state.summary) $("#scroll").focus({ preventScroll: true });
@@ -924,19 +1027,10 @@ function route() {
 
 /* ================================================================== wire */
 function boot() {
-  const saved = localStorage.getItem("ra-theme");
-  if (saved) document.documentElement.setAttribute("data-theme", saved);
-  $("#theme").addEventListener("click", () => {
-    const now = document.documentElement.getAttribute("data-theme");
-    const next = now === "light" ? "dark" : now === "dark" ? "" : "light";
-    if (next) {
-      document.documentElement.setAttribute("data-theme", next);
-      localStorage.setItem("ra-theme", next);
-    } else {
-      document.documentElement.removeAttribute("data-theme");
-      localStorage.removeItem("ra-theme");
-    }
-  });
+  // One theme, so the stale preference from the old two-theme toggle is dropped
+  // rather than left to set data-theme on a document that no longer reads it.
+  localStorage.removeItem("ra-theme");
+  document.documentElement.removeAttribute("data-theme");
 
   window.addEventListener("hashchange", route);
   route();
@@ -954,6 +1048,76 @@ function boot() {
     } catch (e) { toast(e.message, "err"); }
     finally { b.disabled = false; }
   });
+
+  const livedemoPay = $("#livedemo-pay");
+  if (livedemoPay) {
+    livedemoPay.addEventListener("click", async () => {
+      const statusEl = $("#livedemo-status");
+      livedemoPay.disabled = true;
+      statusEl.textContent = "Creating order...";
+      try {
+        const data = await post("/api/demo/order");
+        const pipelineUrl = "/live-pipeline.html?demo_id=" + encodeURIComponent(data.demo_id);
+        // Razorpay's checkout always overlays whatever tab called rzp.open(), so the
+        // pipeline has to live in a tab of its own to stay visible while it's open.
+        window.open(pipelineUrl, "sahara-pipeline");
+        statusEl.textContent = "Order " + data.order_id + " created. Pipeline tab opened — " +
+          "switch to it, then fail the checkout that's about to appear here.";
+
+        const rzp = new Razorpay({
+          key: data.key_id,
+          amount: data.amount,
+          currency: data.currency,
+          order_id: data.order_id,
+          name: "Sahara — Test mode",
+          description: "Recovery loop demo order",
+          notes: { case_source: "live-demo", subscription_id: data.demo_id, customer_id: data.demo_id },
+          handler: function (response) {
+            statusEl.textContent = "Payment succeeded: " + response.razorpay_payment_id +
+              " — nothing for the pipeline to react to. Try again and fail it instead.";
+            livedemoPay.disabled = false;
+          },
+          modal: { ondismiss: function () { livedemoPay.disabled = false; } },
+        });
+        rzp.on("payment.failed", function (response) {
+          statusEl.textContent = "Payment failed: " + response.error.description +
+            " — check the pipeline tab.";
+          livedemoPay.disabled = false;
+        });
+        rzp.open();
+      } catch (e) {
+        statusEl.textContent = "Error: " + e.message;
+        livedemoPay.disabled = false;
+      }
+    });
+  }
+
+  const livedemoInject = $("#run-livedemo-inject");
+  if (livedemoInject) {
+    livedemoInject.addEventListener("click", async () => {
+      const statusEl = $("#livedemo-inject-status");
+      livedemoInject.disabled = true;
+      statusEl.textContent = "Injecting...";
+      try {
+        const r = await post("/api/control/inject", {
+          category: $("#livedemo-category").value,
+          amount_rupees: Number($("#livedemo-amount").value),
+        });
+        if (r.case_id) {
+          window.open("/live-pipeline.html?case_id=" + encodeURIComponent(r.case_id), "sahara-pipeline");
+          statusEl.textContent = "Case " + r.case_id + " opened (" + r.requested_category +
+            ") — pipeline tab opened.";
+        } else {
+          statusEl.textContent = "Event was " + r.status + " — no case opened.";
+        }
+        await refresh();
+      } catch (e) {
+        statusEl.textContent = "Error: " + e.message;
+      } finally {
+        livedemoInject.disabled = false;
+      }
+    });
+  }
 
   document.addEventListener("click", (ev) => {
     const trace = ev.target.closest("[data-trace]");

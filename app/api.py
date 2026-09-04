@@ -64,7 +64,30 @@ _INVARIANT_PLAIN = {
     "I4": ("Never guess a cause",
            "If the failure reason is unknown — or the model was unsure, unavailable, or "
            "malformed — the case stops untouched rather than being acted on blindly."),
+    "I5": ("Never message at night",
+           "No customer contact leaves the system between 21:00 and 09:00 IST. A "
+           "contact that comes due inside that window waits for the morning; it is "
+           "never sent early and never dropped."),
+    "I6": ("One opt-out covers the person",
+           "A customer who asks to be left alone is left alone on every subscription "
+           "they hold, including ones whose cases do not exist yet — and on silent "
+           "re-charges too, not only on messages."),
+    "I7": ("Never more than a few a day",
+           "A customer has a daily contact ceiling across all of their cases, and the "
+           "system as a whole has a daily outreach spend ceiling. Either one defers "
+           "the contact to the next morning rather than dropping it."),
 }
+
+# Gate E1 is described here alongside the invariants because the dashboard shows them
+# in one panel, but it is a different KIND of rule and the wording says so: the
+# invariants are safety, and this is a business judgement made of estimates.
+_ECONOMICS_PLAIN = (
+    "Never send a message that costs more than it earns",
+    "Every intervention is priced before it is taken — the chance it works times the "
+    "money at stake, minus what it costs to send and the risk of pushing the customer "
+    "into cancelling. A negative number stops the case. The arithmetic is written onto "
+    "every decision, including the ones that went ahead.",
+)
 
 
 @router.get("/mechanism")
@@ -79,24 +102,44 @@ def mechanism() -> dict[str, Any]:
     stops = metrics.stopped_by_status()
     stop_for = {
         "I1": stops.get("stopped_max_attempts", 0),
-        "I2": stops.get("stopped_cooldown_expired", 0),
+        # Every timing gate that runs out of episode window closes the case under this
+        # one status, so the count is attributed to the gate named in the audit entry
+        # rather than assumed to be I2's.
+        "I2": 0, "I5": 0, "I7": 0,
         "I3": stops.get("stopped_opt_out", 0),
         "I4": stops.get("stopped_unknown", 0),
+        "I6": stops.get("stopped_suppressed", 0),
     }
-    defers = int(db.scalar(
-        "SELECT COUNT(*) FROM audit_log WHERE stage = 'decide' AND summary LIKE '%deferred by I2%'", (), 0))
+    for code in ("I2", "I5", "I7"):
+        stop_for[code] = int(db.scalar(
+            "SELECT COUNT(*) FROM audit_log WHERE stage = 'stop' AND summary LIKE ?",
+            (f"%by {code}:%",), 0))
+    defers = {code: int(db.scalar(
+        "SELECT COUNT(*) FROM audit_log WHERE stage = 'decide' AND summary LIKE ?",
+        (f"%deferred by {code}:%",), 0)) for code in ("I2", "I5", "I7")}
 
     invariants_out = []
-    for code in ("I1", "I2", "I3", "I4"):
+    for code in ("I1", "I2", "I3", "I4", "I5", "I6", "I7"):
         title, plain = _INVARIANT_PLAIN[code]
         invariants_out.append({
             "code": code,
             "title": title,
             "rule": invariants.INVARIANT_TEXT[code],
             "plain": plain,
+            "kind": "safety" if code in ("I1", "I2", "I3", "I4") else "contact_hygiene",
             "stops": stop_for[code],
-            "defers": defers if code == "I2" else 0,
+            "defers": defers.get(code, 0),
         })
+    title, plain = _ECONOMICS_PLAIN
+    invariants_out.append({
+        "code": "E1",
+        "title": title,
+        "rule": "an intervention whose expected value is negative is never executed",
+        "plain": plain,
+        "kind": "economics",
+        "stops": stops.get("stopped_uneconomic", 0),
+        "defers": 0,
+    })
 
     policy = [
         {"category": cat, "attempt": att,
@@ -148,6 +191,21 @@ def mechanism() -> dict[str, Any]:
             "cooldown_hours": config.COOLDOWN_HOURS,
             "episode_window_days": config.EPISODE_WINDOW_DAYS,
             "promise_window_hours": config.PROMISE_WINDOW_HOURS,
+            "quiet_hours_ist": [config.QUIET_HOURS_START_IST, config.QUIET_HOURS_END_IST],
+            "max_contacts_per_customer_per_day": config.MAX_CONTACTS_PER_CUSTOMER_PER_DAY,
+            "daily_outreach_budget_paise": config.DAILY_OUTREACH_BUDGET_PAISE,
+        },
+        "economics": {
+            "unit_costs_paise": dict(config.ACTION_COST_PAISE),
+            "contact_churn_hazard": list(config.CONTACT_CHURN_HAZARD),
+            "ltv_horizon_months": config.LTV_HORIZON_MONTHS,
+            "p_recover_prior": [
+                {"category": cat, "action": act, "by_attempt": list(row)}
+                for (cat, act), row in sorted(config.P_RECOVER_PRIOR.items())
+            ],
+            "p_recover_default": list(config.P_RECOVER_DEFAULT),
+            "basis": ("assumptions with stated rationale, not measurements; the priors are "
+                      "deliberately not the batch simulator's outcome model"),
         },
     }
 
@@ -226,6 +284,40 @@ def trace(metric: str) -> dict[str, Any]:
     return result
 
 
+@router.get("/audit/verify")
+def audit_verify() -> dict[str, Any]:
+    """Recompute the audit log's hash chain and report the first break, if any.
+
+    This is the endpoint that makes "append-only" checkable by someone who does not
+    trust the code: edit one summary in the database with sqlite3 and this turns red,
+    naming the row. `head` is a one-line fingerprint of the whole run.
+    """
+    return audit.verify()
+
+
+@router.get("/suppression")
+def suppression_list() -> dict[str, Any]:
+    """Who the agent will not contact, and why. Invariant I6 reads this table."""
+    rows = cases.suppressed_customers()
+    return {"n": len(rows), "rule": invariants.INVARIANT_TEXT["I6"], "customers": rows}
+
+
+@router.post("/suppression/{customer_id}")
+def suppress(customer_id: str, reason: str = Query("manual")) -> dict[str, Any]:
+    """Add a customer to the suppression list.
+
+    Deliberately has no counterpart that removes one. Un-suppressing someone is
+    re-consenting on their behalf, which is not an operation this system should make
+    one HTTP call away; it belongs in the database, deliberately, with a person
+    accountable for it.
+    """
+    try:
+        row = cases.suppress_customer(customer_id, reason, source="POST /api/suppression")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"customer_id": customer_id, "suppression": row, "invariant": "I6"}
+
+
 @router.post("/cases/{case_id}/opt-out")
 def opt_out(case_id: str) -> dict[str, Any]:
     """Demo helper for invariant I3: mark the customer opted out. The next gate —
@@ -234,9 +326,21 @@ def opt_out(case_id: str) -> dict[str, Any]:
     if case is None:
         raise HTTPException(status_code=404, detail=f"unknown case {case_id}")
     cases.set_opted_out(case_id, True)
+    # An opt-out is a statement by a person, not about a subscription, so it lands in
+    # both places: the case flag that I3 reads, and the suppression list that I6 reads
+    # on every OTHER case that customer has, including ones that do not exist yet.
+    suppression = cases.suppress_customer(
+        case["customer_id"], "opt_out", source="POST /api/cases/{id}/opt-out",
+        note=f"opted out on case {case_id}")
     audit.audit(
         case_id, "detect", "human",
-        "Customer opted out of recovery contact",
-        {"source": "POST /api/cases/{id}/opt-out", "invariant": "I3"},
+        "Customer opted out of recovery contact, and was added to the suppression list",
+        {"source": "POST /api/cases/{id}/opt-out", "invariant": "I3",
+         "also": "I6", "customer_id": case["customer_id"]},
     )
-    return {"case_id": case_id, "customer_opted_out": True, "status": cases.get(case_id)["status"]}
+    return {
+        "case_id": case_id,
+        "customer_opted_out": True,
+        "status": cases.get(case_id)["status"],
+        "suppression": suppression,
+    }

@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS recovery_case (
   currency TEXT NOT NULL DEFAULT 'INR',
   status TEXT NOT NULL CHECK (status IN ('open','recovered','stopped_max_attempts',
     'stopped_cooldown_expired','stopped_opt_out','stopped_unknown','stopped_handoff',
-    'stopped_holdout')),
+    'stopped_uneconomic','stopped_suppressed','stopped_holdout')),
   attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count BETWEEN 0 AND 3),
   last_contact_at TEXT,
   current_category TEXT CHECK (current_category IN ('card_expired','insufficient_funds',
@@ -89,6 +89,11 @@ CREATE TABLE IF NOT EXISTS intervention_decision (
   decided_at TEXT NOT NULL,
   scheduled_for TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('scheduled','executed','blocked_by_invariant','superseded')),
+  -- The economics of this decision, computed BEFORE it was taken (app/economics.py).
+  -- Written on every decision, not only the ones the gate stopped, so that a reader
+  -- can see what the agent expected to gain from an action it went ahead with.
+  ev_paise INTEGER,
+  ev_detail TEXT,
   synthetic INTEGER NOT NULL DEFAULT 0 CHECK (synthetic IN (0,1))
 );
 
@@ -107,13 +112,16 @@ CREATE TABLE IF NOT EXISTS execution_record (
   copy_validation TEXT,
   status TEXT NOT NULL CHECK (status IN ('success','failed')),
   result_payload TEXT,
+  -- What this execution cost to perform, in paise. Summed into the net-recovery
+  -- metrics, so money recovered is never reported without the money it took.
+  cost_paise INTEGER NOT NULL DEFAULT 0 CHECK (cost_paise >= 0),
   executed_at TEXT NOT NULL,
   synthetic INTEGER NOT NULL DEFAULT 0 CHECK (synthetic IN (0,1))
 );
 
 -- ---------------------------------------------------------------- AuditLogEntry
 -- APPEND ONLY. There is no UPDATE or DELETE against this table anywhere in app/;
--- tests/test_audit_append_only.py greps for one and fails the build if it appears.
+-- tests/test_llm_boundary.py greps for one and fails the build if it appears.
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   case_id TEXT NOT NULL REFERENCES recovery_case(id),
@@ -123,7 +131,28 @@ CREATE TABLE IF NOT EXISTS audit_log (
   summary TEXT NOT NULL,
   detail TEXT NOT NULL,
   created_at TEXT NOT NULL,
+  -- Tamper evidence. entry_hash = sha256 over this row's canonical JSON together
+  -- with the previous entry's hash, across the WHOLE log rather than per case, so
+  -- deleting an entire case's trail breaks the chain just as loudly as editing one
+  -- word of it. Nullable only so that a database written before this column existed
+  -- still opens; app/audit.py fills both on every write and verify() reports any
+  -- unchained rows separately rather than passing them silently.
+  prev_hash TEXT,
+  entry_hash TEXT,
   synthetic INTEGER NOT NULL DEFAULT 0 CHECK (synthetic IN (0,1))
+);
+
+-- ------------------------------------------------------------------ suppression
+-- An opt-out recorded against the PERSON, not one of their cases (invariant I6).
+-- recovery_case.customer_opted_out is per-case and is what I3 reads; this table is
+-- what makes an opt-out on one subscription stop the agent on that customer's other
+-- subscriptions too, including ones whose cases do not exist yet.
+CREATE TABLE IF NOT EXISTS suppression (
+  customer_id TEXT PRIMARY KEY,
+  reason TEXT NOT NULL CHECK (reason IN ('opt_out','complaint','manual')),
+  source TEXT NOT NULL,
+  note TEXT,
+  created_at TEXT NOT NULL
 );
 
 -- ------------------------------------------------------------------- run metadata
@@ -145,3 +174,5 @@ CREATE INDEX IF NOT EXISTS idx_decision_case ON intervention_decision(case_id);
 CREATE INDEX IF NOT EXISTS idx_decision_due ON intervention_decision(status, scheduled_for);
 CREATE INDEX IF NOT EXISTS idx_execution_case ON execution_record(case_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_case_seq ON audit_log(case_id, seq);
+CREATE INDEX IF NOT EXISTS idx_execution_executed_at ON execution_record(executed_at);
+CREATE INDEX IF NOT EXISTS idx_case_customer ON recovery_case(customer_id);

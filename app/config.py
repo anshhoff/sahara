@@ -35,6 +35,32 @@ EPISODE_WINDOW_DAYS = 14  # an open case older than this is closed, never left a
 LLM_CONFIDENCE_THRESHOLD = 0.8
 PROMISE_WINDOW_HOURS = 72  # promise-to-pay grace before handoff
 
+# ------------------------------------------------------- contact-time bounds
+# India-specific and deliberately conservative. TRAI's commercial-communication
+# framework restricts promotional messaging to daytime hours; transactional dunning
+# sits in a softer category, so 09:00-21:00 IST is stricter than the letter of the
+# rule rather than an attempt to sit exactly on it. IST is UTC+05:30 with no DST,
+# which is why a fixed offset is correct here and a timezone database is not needed.
+IST_OFFSET_MINUTES = 330
+QUIET_HOURS_START_IST = 21  # no customer contact from 21:00 ...
+QUIET_HOURS_END_IST = 9     # ... until 09:00 the next morning (I5)
+
+# On by default everywhere, including the test suite (tests/test_contact_hygiene.py
+# pins I5's behavior). The one legitimate reason to flip this off is walking a live
+# demo through multiple attempts at night without waiting out real IST hours — a
+# demo-only override, not a relaxed default, which is why it takes an explicit env
+# var rather than a lower default.
+QUIET_HOURS_ENABLED = _env_bool("QUIET_HOURS_ENABLED", True)
+
+# I7. Two independent daily ceilings, both reset at IST midnight.
+#
+# I2 already spaces contacts 24h apart WITHIN one case. Neither of these is a
+# duplicate of it: MAX_CONTACTS_PER_CUSTOMER_PER_DAY spans a customer's *other*
+# subscriptions, which I2 cannot see, and DAILY_OUTREACH_BUDGET_PAISE is a
+# system-wide spend ceiling that binds no matter how many customers are involved.
+MAX_CONTACTS_PER_CUSTOMER_PER_DAY = 2
+DAILY_OUTREACH_BUDGET_PAISE = int(_env("DAILY_OUTREACH_BUDGET_PAISE", "500000"))  # Rs 5,000
+
 # --------------------------------------------------------------------- enums
 CATEGORIES = (
     "card_expired",
@@ -59,6 +85,12 @@ CASE_STATUSES = (
     "stopped_opt_out",
     "stopped_unknown",
     "stopped_handoff",
+    # The economics said no: the expected value of the next intervention was
+    # negative, so the cheapest correct action was to not send it (gate E1, economics.py).
+    "stopped_uneconomic",
+    # The customer is on the suppression list — an opt-out recorded against the
+    # PERSON, not this one case, so it reaches their other subscriptions too (I6).
+    "stopped_suppressed",
     # A control-arm case: deliberately never intervened on, so the treated arm has
     # something to be measured against. Not a failure and not a safety stop.
     "stopped_holdout",
@@ -247,3 +279,88 @@ STATIC_TEMPLATES: dict[tuple[str, str], str] = {
 # Placeholder link used when an execution is simulated rather than a real test-mode
 # Payment Link. `.invalid` is reserved by RFC 2606 and can never resolve.
 SIMULATED_LINK_BASE = "https://example.invalid/pay/"
+
+
+# ------------------------------------------------------------------ economics
+# What an intervention COSTS, so that recovery can be reported net rather than
+# gross. Every constant below is an assumption with a stated rationale and no
+# measurement behind it — the same honesty that applies to the batch's outcome
+# model applies here, and the README says so in the same words.
+#
+# The point of pricing an intervention is not the arithmetic. It is that a system
+# which only counts rupees recovered will always conclude that one more message is
+# free, and it is not: it costs a fraction of a rupee to send and some probability
+# of the customer cancelling outright.
+
+# Direct, per-execution cost.
+#  * RETRY_LATER is a silent re-charge of an existing mandate. It contacts nobody
+#    and costs nothing to attempt, which is exactly why the policy table reaches
+#    for it first wherever the instrument might still work.
+#  * A contact is priced fully loaded, not at the wire cost of an SMS: Rs 0.25 to
+#    send, plus roughly a 4% chance of provoking an inbound support contact worth
+#    about Rs 300 of somebody's time. Rs 0.25 + 0.04 x Rs 300 = Rs 12.25, rounded.
+#  * STOP_HANDOFF moves no money and sends nothing, but it is not free — it puts a
+#    case in a human queue. Counting it is what stops "hand it off" from looking
+#    like a costless way to make a hard case disappear.
+ACTION_COST_PAISE: dict[str, int] = {
+    "RETRY_LATER": 0,
+    "SEND_UPDATE_LINK": 1200,
+    "PROMISE_TO_PAY": 1200,
+    "STOP_HANDOFF": 4000,
+}
+
+# The cost that does not appear on any invoice: each successive unsolicited payment
+# message in one episode carries a chance the customer cancels rather than pays.
+# Indexed by attempt number, escalating — the third message is more irritating than
+# the first, not equally so.
+CONTACT_CHURN_HAZARD: tuple[float, ...] = (0.004, 0.010, 0.020)
+
+# What a cancellation costs, expressed as months of the failed charge. One charge
+# cycle is what the case is worth today; the subscription behind it is worth more.
+# Twelve is a deliberately modest horizon: a longer one would inflate the annoyance
+# term and make the agent look more restrained than its evidence supports.
+LTV_HORIZON_MONTHS = 12
+
+# The agent's OWN belief about how often an intervention works, by (category,
+# action) and attempt number.
+#
+# This table must never be reconciled with scripts/run_batch.py's SUCCESS_PROBABILITY,
+# which is the simulated world's ground truth. They are two different objects: this
+# is what the agent believes before acting, that is what actually happens. If they
+# were equal the agent would be scoring its decisions with the answer key, every EV
+# would be correct by construction, and the whole measurement would be circular.
+# tests/test_economics.py asserts they are not equal, and that nothing in app/
+# imports the simulator.
+#
+# The ordering is the defensible part, not the exact values: a first touch converts
+# best, reminders decay, and a promise-to-pay holds its rate because it is agreed
+# with the customer rather than pushed at them.
+P_RECOVER_PRIOR: dict[tuple[str, str], tuple[float, float, float]] = {
+    ("card_expired", "SEND_UPDATE_LINK"): (0.36, 0.22, 0.14),
+    ("insufficient_funds", "RETRY_LATER"): (0.42, 0.32, 0.24),
+    ("insufficient_funds", "PROMISE_TO_PAY"): (0.46, 0.46, 0.46),
+    ("insufficient_funds", "SEND_UPDATE_LINK"): (0.32, 0.18, 0.12),
+    ("issuer_declined", "RETRY_LATER"): (0.28, 0.22, 0.16),
+    ("issuer_declined", "SEND_UPDATE_LINK"): (0.30, 0.22, 0.14),
+    ("authentication_failed", "SEND_UPDATE_LINK"): (0.42, 0.24, 0.16),
+    ("invalid_payment_method", "SEND_UPDATE_LINK"): (0.26, 0.16, 0.10),
+}
+# Anything the table does not name is assumed to work poorly rather than averagely.
+# An unlisted pair is a pair nobody reasoned about, and the safe reading of a cell
+# nobody reasoned about is a pessimistic one.
+P_RECOVER_DEFAULT: tuple[float, float, float] = (0.20, 0.12, 0.08)
+
+# Which terminal states put a case in front of a person, and therefore incur the
+# STOP_HANDOFF cost above. Deliberately not "everything that did not recover":
+#
+#   * opt-out and suppression are the customer's decision, and there is nothing for a
+#     human to work on — acting further is precisely what was forbidden;
+#   * a holdout case was never worked by anyone, by construction;
+#   * an uneconomic case was closed because pursuing it costs more than it returns,
+#     and charging it a human's time would contradict the decision that closed it.
+HANDOFF_STATUSES = (
+    "stopped_handoff",
+    "stopped_max_attempts",
+    "stopped_cooldown_expired",
+    "stopped_unknown",
+)

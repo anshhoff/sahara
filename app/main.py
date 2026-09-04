@@ -17,7 +17,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app import api, clock, config, control, db, executor, llm, webhooks
+from app import api, clock, config, control, db, executor, live_demo, llm, webhooks
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("recovery-agent")
@@ -26,11 +26,12 @@ TICK_INTERVAL_SECONDS = int(os.environ.get("TICK_INTERVAL_SECONDS", "30"))
 DASHBOARD_DIR = Path(config.ROOT) / "dashboard"
 
 app = FastAPI(
-    title="Failed Subscription Recovery Agent",
-    description="Razorpay AI Buildathon — Track 03: AI Revenue Recovery",
+    title="Sahara",
+    description="Failed Subscription Recovery Agent — Razorpay AI Buildathon, Track 03: AI Revenue Recovery",
     version="1.0",
 )
 app.include_router(api.router)
+app.include_router(live_demo.router)
 if config.CONTROL_ENABLED:
     # The dashboard's control room. Off in one place; see app/control.py.
     app.include_router(control.router)

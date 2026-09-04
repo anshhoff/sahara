@@ -102,6 +102,36 @@ def set_opted_out(case_id: str, opted_out: bool = True) -> dict[str, Any]:
     return touch(case_id, customer_opted_out=1 if opted_out else 0)
 
 
+# ------------------------------------------------------------------ suppression
+# The per-case opt-out flag above is what invariant I3 reads. This table is what I6
+# reads, and the difference is scope: an opt-out belongs to a case, a suppression
+# belongs to a person. Someone who asks to be left alone about one failing
+# subscription has not asked to be left alone about only that one subscription.
+#
+# Writes live here rather than in invariants.py so that module keeps its independence
+# claim — it reads this table and imports nothing new to do it.
+def suppress_customer(customer_id: str, reason: str = "opt_out", *, source: str = "system",
+                      note: Optional[str] = None) -> dict[str, Any]:
+    """Add a customer to the suppression list, idempotently.
+
+    `INSERT OR IGNORE`, not upsert: the FIRST reason a customer was suppressed is the
+    one that matters, and a later, weaker reason must never overwrite a complaint.
+    """
+    if reason not in ("opt_out", "complaint", "manual"):
+        raise ValueError(f"unknown suppression reason {reason!r}")
+    db.execute(
+        "INSERT OR IGNORE INTO suppression (customer_id, reason, source, note, created_at)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (customer_id, reason, source, note, clock.now_iso()),
+    )
+    return db.row_to_dict(
+        db.query_one("SELECT * FROM suppression WHERE customer_id = ?", (customer_id,)))
+
+
+def suppressed_customers() -> list[dict[str, Any]]:
+    return db.rows_to_dicts(db.query("SELECT * FROM suppression ORDER BY created_at DESC"))
+
+
 # The increment is computed by SQLite, never in Python. A read-modify-write here
 # would let two concurrent callers both read the same attempt_count and both write
 # count+1, losing an attempt and taking I1 with it. last_contact_at is written in the

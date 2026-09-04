@@ -10,11 +10,11 @@ database is the single source of truth and the dashboard cannot drift from it.
 """
 from __future__ import annotations
 
+import json
+import random
 from typing import Any, Optional
 
-import random
-
-from app import clock, config, db
+from app import audit, clock, config, db
 
 Traced = tuple[Any, list[str]]
 
@@ -189,6 +189,81 @@ def synthetic_split() -> dict[str, Any]:
     }
 
 
+# ------------------------------------------------------------------ economics
+def costs() -> dict[str, Any]:
+    """What the recovery cost to run, in rupees that actually moved.
+
+    Two components, kept apart because they are spent on different things:
+
+    * **outreach** — the sum of `execution_record.cost_paise`, every message the agent
+      sent, successful or not.
+    * **handoff** — the human queue. A case is not free to give to a person, and a
+      system that could make any hard case disappear at zero cost by handing it off
+      would be measuring the wrong thing. `config.HANDOFF_STATUSES` says exactly which
+      terminal states count, and why the others do not.
+
+    The annoyance term from `economics.evaluate` is deliberately absent. It prices a
+    decision before it is taken, but no rupee ever leaves the account for it, and
+    booking a modelled risk as a realised cost would make this ledger an opinion.
+    """
+    outreach = int(db.scalar("SELECT COALESCE(SUM(cost_paise), 0) FROM execution_record", (), 0))
+    marks = ", ".join("?" for _ in config.HANDOFF_STATUSES)
+    n_handoff = int(db.scalar(
+        f"SELECT COUNT(*) FROM recovery_case WHERE status IN ({marks})",
+        config.HANDOFF_STATUSES, 0))
+    handoff = n_handoff * int(config.ACTION_COST_PAISE["STOP_HANDOFF"])
+    by_action = {
+        r["action"]: {"n": int(r["n"]), "paise": int(r["paise"] or 0)}
+        for r in db.query(
+            "SELECT action, COUNT(*) AS n, COALESCE(SUM(cost_paise), 0) AS paise"
+            " FROM execution_record GROUP BY action")
+    }
+    return {
+        "outreach_paise": outreach,
+        "n_handoff_cases": n_handoff,
+        "handoff_paise": handoff,
+        "total_paise": outreach + handoff,
+        "by_action": by_action,
+        "unit_costs_paise": dict(config.ACTION_COST_PAISE),
+    }
+
+
+def net_recovery() -> dict[str, Any]:
+    """Recovered minus spent — gross, and then the version that survives its own costs.
+
+    `net_incremental_paise` is the number this project actually stands behind: money
+    that came back BECAUSE of the agent (treated minus control), minus everything the
+    agent spent to get it. Gross recovery cannot go down by sending more messages,
+    which is what makes it the wrong headline and this the right one.
+    """
+    recovered_paise, _ = recovered()
+    c = costs()
+    inc = incremental_recovery()
+    gross_net = recovered_paise - c["total_paise"]
+    out = {
+        "gross_recovered_paise": recovered_paise,
+        "total_cost_paise": c["total_paise"],
+        "net_recovered_paise": gross_net,
+        # Rupees spent per Rs 100 that came back. Directly comparable across arms,
+        # batches and merchants in a way that a raw total is not.
+        "cost_per_100_recovered": (round(c["total_paise"] / recovered_paise * 100, 2)
+                                   if recovered_paise else None),
+        "incremental_available": bool(inc.get("available")),
+    }
+    if inc.get("available"):
+        # Every rupee of cost was spent on the treated arm — a control case is never
+        # executed against — so the whole cost is subtracted from the incremental
+        # figure rather than apportioned between the arms.
+        out["incremental_paise"] = inc["incremental_paise_total"]
+        out["net_incremental_paise"] = inc["incremental_paise_total"] - c["total_paise"]
+        out["incremental_paise_ci95"] = inc["incremental_paise_ci95"]
+        out["net_incremental_paise_ci95"] = [
+            inc["incremental_paise_ci95"][0] - c["total_paise"],
+            inc["incremental_paise_ci95"][1] - c["total_paise"],
+        ]
+    return out
+
+
 # ------------------------------------------------------------- reconciliation
 def reconciliation() -> dict[str, Any]:
     """The identity asserted at the end of every batch run and checkable live
@@ -212,10 +287,48 @@ def reconciliation() -> dict[str, Any]:
 
 
 # ------------------------------------------------------------------- summary
+def self_cure_recovered_ids() -> Optional[set[str]]:
+    """Cases whose recovery signal arrived from the WORLD rather than from us.
+
+    On a synthetic batch, `scripts/run_batch.py` stamps every recovery event it emits
+    with `simulated_origin`, and that stamp lands in `failure_event.raw_payload`, which
+    is immutable after insert. A recovery carrying `self_cure` is one the customer's
+    payday or the issuer produced; anything else followed an intervention.
+
+    This distinction cannot be recovered from the case row. Once a treated case is
+    `recovered`, nothing about it says whether the agent earned that rupee — which is
+    exactly why the control arm exists, and why the per-arm organic counts are worth
+    publishing next to the lift rather than asked to be taken on trust.
+
+    Returns None when no event carries the stamp at all — a live database, or a batch
+    written before it existed. None means "not knowable here", and every caller reports
+    it as unavailable rather than as zero. A missing measurement is not a measurement
+    of zero.
+    """
+    rows = db.query(
+        "SELECT fe.case_id AS case_id, fe.raw_payload AS raw_payload FROM failure_event fe"
+        " WHERE fe.case_id IS NOT NULL AND fe.event_type IN ('subscription.charged','payment_link.paid')")
+    ids: set[str] = set()
+    stamped = False
+    for r in rows:
+        try:
+            origin = (json.loads(r["raw_payload"]) or {}).get("simulated_origin")
+        except (TypeError, ValueError):
+            continue
+        if origin is None:
+            continue
+        stamped = True
+        if origin == "self_cure":
+            ids.add(r["case_id"])
+    return ids if stamped else None
+
+
 def _arm(holdout: int) -> list[dict[str, Any]]:
+    """One arm's cases, each carrying how many interventions were executed against it."""
     return db.rows_to_dicts(db.query(
-        "SELECT id, status, amount_at_risk_paise FROM recovery_case"
-        " WHERE is_holdout = ? ORDER BY created_at", (holdout,)))
+        "SELECT c.id AS id, c.status AS status, c.amount_at_risk_paise AS amount_at_risk_paise,"
+        " (SELECT COUNT(*) FROM execution_record e WHERE e.case_id = c.id) AS n_executions"
+        " FROM recovery_case c WHERE c.is_holdout = ? ORDER BY c.created_at", (holdout,)))
 
 
 def incremental_recovery(bootstrap: int = 10000, seed: int = 42) -> dict[str, Any]:
@@ -284,12 +397,55 @@ def incremental_recovery(bootstrap: int = 10000, seed: int = 42) -> dict[str, An
     m_lo, m_hi = ci(money_diffs)
     gross = sum(int(r["amount_at_risk_paise"]) for r in treated if r["status"] == "recovered")
 
+    # Organic = recovered on a self-cure signal, i.e. money that would have arrived
+    # with or without the agent. Self-cure is a property of the world, so it must run
+    # at about the same rate in both arms; publishing both counts is what lets a
+    # reader check the arms are balanced instead of taking it on faith.
+    self_cured = self_cure_recovered_ids()
+
+    def organic(rows: list[dict[str, Any]]) -> Optional[int]:
+        if self_cured is None:
+            return None
+        return sum(1 for r in rows if r["status"] == "recovered" and r["id"] in self_cured)
+
+    def untouched(rows: list[dict[str, Any]]) -> int:
+        """Recovered without a single intervention having been executed. Distinct from
+        organic: a treated case can self-cure *after* we contacted it, in which case it
+        is organic but not untouched."""
+        return sum(1 for r in rows if r["status"] == "recovered" and int(r["n_executions"]) == 0)
+
+    def arm_block(rows: list[dict[str, Any]], r: float) -> dict[str, Any]:
+        n_org = organic(rows)
+        return {
+            "n": len(rows),
+            "recovered": sum(1 for x in rows if x["status"] == "recovered"),
+            "rate": round(r, 4),
+            "organic": n_org,
+            "organic_rate": (None if n_org is None or not rows else round(n_org / len(rows), 4)),
+            "untouched": untouched(rows),
+        }
+
+    org_t, org_c = organic(treated), organic(control)
+
     return {
         "available": True,
-        "treated": {"n": len(treated), "recovered": sum(1 for r in treated if r["status"] == "recovered"),
-                    "rate": round(t_rate, 4)},
-        "control": {"n": len(control), "recovered": sum(1 for r in control if r["status"] == "recovered"),
-                    "rate": round(c_rate, 4)},
+        "treated": arm_block(treated, t_rate),
+        "control": arm_block(control, c_rate),
+        # Stated as its own field so the dashboard and the README can cite the balance
+        # claim without recomputing it.
+        "organic_balance": {
+            "available": self_cured is not None,
+            "treated": org_t,
+            "control": org_c,
+            "treated_rate": (None if org_t is None or not treated else round(org_t / len(treated), 4)),
+            "control_rate": (None if org_c is None or not control else round(org_c / len(control), 4)),
+            "note": ("organic = recovered on a self-cure signal rather than after an "
+                     "intervention. Self-cure is a property of the world, so it is rolled "
+                     "for every case in BOTH arms from the same distribution and should "
+                     "run at about the same rate in each. Derivable only on a synthetic "
+                     "batch, where the simulator stamps the provenance of every recovery "
+                     "event it emits."),
+        },
         "lift": round(lift, 4),
         "lift_ci95": [round(lo, 4), round(hi, 4)],
         # Significant only when the interval excludes zero — i.e. the sign of the
@@ -328,10 +484,16 @@ def summary() -> dict[str, Any]:
         "execution_modes": execution_modes(),
         "reconciliation": reconciliation(),
         "incremental": incremental_recovery(),
+        "costs": costs(),
+        "net": net_recovery(),
+        "audit_chain": audit.verify(),
         "bounds": {
             "max_attempts": config.MAX_ATTEMPTS,
             "cooldown_hours": config.COOLDOWN_HOURS,
             "episode_window_days": config.EPISODE_WINDOW_DAYS,
+            "quiet_hours_ist": [config.QUIET_HOURS_START_IST, config.QUIET_HOURS_END_IST],
+            "max_contacts_per_customer_per_day": config.MAX_CONTACTS_PER_CUSTOMER_PER_DAY,
+            "daily_outreach_budget_paise": config.DAILY_OUTREACH_BUDGET_PAISE,
             "llm_confidence_threshold": config.LLM_CONFIDENCE_THRESHOLD,
             "llm_provider": config.LLM_PROVIDER,
             "llm_model": config.LLM_MODEL if config.LLM_PROVIDER != config.PROVIDER_NONE else None,

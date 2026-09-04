@@ -15,7 +15,7 @@ import logging
 import re
 from typing import Any, Optional
 
-from app import audit, cases, clock, config, db, invariants, llm
+from app import audit, cases, clock, config, db, economics, invariants, llm
 
 log = logging.getLogger(__name__)
 
@@ -405,6 +405,10 @@ def execute_decision(decision: dict[str, Any]) -> Optional[dict[str, Any]]:
             if result.get("copy_validation") is not None else None,
             "status": result["status"],
             "result_payload": json.dumps(result.get("result_payload"), default=str, sort_keys=True),
+            # Booked whether the execution succeeded or failed: a message that went out
+            # and did not work still cost what it cost, and a cost ledger that only
+            # counts successes is a cost ledger that flatters itself.
+            "cost_paise": economics.execution_cost_paise(decision["action"]),
             "executed_at": executed_at,
             "synthetic": case["synthetic"],
         },
@@ -417,6 +421,7 @@ def execute_decision(decision: dict[str, Any]) -> Optional[dict[str, Any]]:
          f"({result['status']})"),
         {
             "execution_id": execution_id,
+            "cost_paise": economics.execution_cost_paise(decision["action"]),
             "decision_id": decision["id"],
             "action": decision["action"],
             "mode": result["mode"],

@@ -4,13 +4,18 @@ There is no model in this call path. `POLICY` is total over all six categories a
 all three attempts, so the lookup cannot raise and cannot fall through to a default.
 Every decision cites the exact table cell it came from (`policy_row_ref`) and carries
 the invariant receipts that let a reader confirm the gates actually ran.
+
+The table chooses WHAT to do. Gate E1 (app/economics.py) then asks whether doing it
+is worth more than it costs, and every decision carries the answer — `ev_paise` and
+`ev_detail` are written whether the gate passed or stopped, so a reader can audit the
+arithmetic behind an action the agent took, not only one it declined.
 """
 from __future__ import annotations
 
 import json
 from typing import Any, Optional
 
-from app import audit, cases, clock, config, db, executor, invariants
+from app import audit, cases, clock, config, db, economics, executor, invariants
 
 
 def lookup(category: str, attempt_number: int) -> tuple[str, int]:
@@ -71,25 +76,49 @@ def decide(case: dict[str, Any]) -> Optional[dict[str, Any]]:
         # the same stop would have happened in the treated arm. Keeping the reasons
         # intact is what keeps the arms comparable.
         category = case["current_category"] or "unknown"
-        action, delay_hours = lookup(category, int(case["attempt_count"]) + 1)
+        attempt = int(case["attempt_count"]) + 1
+        action, delay_hours = lookup(category, attempt)
+        withheld_ev = economics.evaluate(case, action, attempt)
         audit.audit(
             case["id"], "decide", "system",
-            f"Control arm: no intervention. Policy row {category}/"
-            f"{int(case['attempt_count']) + 1} would have chosen {action}.",
+            f"Control arm: no intervention. Policy row {category}/{attempt} would have "
+            f"chosen {action}.",
             {
                 "arm": "control",
-                "policy_row_ref": f"{category}/{int(case['attempt_count']) + 1}",
+                "policy_row_ref": f"{category}/{attempt}",
                 "withheld_action": action,
                 "withheld_delay_hours": delay_hours,
+                # The economics of the road not taken. Recorded so the control arm's
+                # cost is measurable too: a holdout is not free, it is the price of
+                # knowing whether the treated arm did anything.
+                "withheld_ev": withheld_ev,
+            },
+        )
+        return None
+
+    category = case["current_category"] or "unknown"
+    attempt = int(case["attempt_count"]) + 1
+    action, delay_hours = lookup(category, attempt)
+
+    # Gate E1. Run before anything is superseded or written, so a case stopped here
+    # leaves no half-made decision behind — the same shape as an invariant stop.
+    ev = economics.evaluate(case, action, attempt)
+    if ev["verdict"] == "stop_uneconomic":
+        cases.transition(
+            case["id"], "stopped_uneconomic",
+            summary=(f"Policy row {category}/{attempt} chose {action}, but its expected value "
+                     f"is {ev['ev_paise']} paise: the contact costs more than it is likely to "
+                     f"return, so it was not sent"),
+            detail={
+                "gate": "E1",
+                "policy_row_ref": f"{category}/{attempt}",
+                "withheld_action": action,
+                "ev": ev,
             },
         )
         return None
 
     superseded = _supersede_scheduled(case["id"])
-    category = case["current_category"] or "unknown"
-    attempt = int(case["attempt_count"]) + 1
-    action, delay_hours = lookup(category, attempt)
-
     decision_id = db.new_id("dec")
     decided_at = clock.now()
     scheduled_for = clock.plus_hours(decided_at, delay_hours)
@@ -106,6 +135,8 @@ def decide(case: dict[str, Any]) -> Optional[dict[str, Any]]:
             "decided_at": clock.to_iso(decided_at),
             "scheduled_for": clock.to_iso(scheduled_for),
             "status": "scheduled",
+            "ev_paise": ev["ev_paise"],
+            "ev_detail": json.dumps(ev, sort_keys=True),
             "synthetic": case["synthetic"],
         },
     )
@@ -121,6 +152,7 @@ def decide(case: dict[str, Any]) -> Optional[dict[str, Any]]:
             "scheduled_for": clock.to_iso(scheduled_for),
             "invariant_check": invariants.receipts(("pre_decision", verdict)),
             "superseded_scheduled_decisions": superseded,
+            "ev": ev,
         },
     )
 

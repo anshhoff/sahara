@@ -107,16 +107,27 @@ def _migrate(conn: sqlite3.Connection) -> None:
     is idempotent and additive; none rewrites or drops existing rows.
 
     (The status CHECK constraint cannot be widened in place without rebuilding the
-    table. An older database therefore accepts the new is_holdout column but would
-    reject a `stopped_holdout` status — which is correct: that database has no control
-    arm in it, so nothing can legitimately land in that state. A fresh run gets the
-    full constraint.)
+    table. An older database therefore accepts the new columns but would reject the
+    statuses added alongside them — `stopped_holdout`, `stopped_uneconomic`,
+    `stopped_suppressed`. That is the correct failure: a database written before
+    those states existed has no case that could legitimately be in one. A fresh run
+    gets the full constraint.)
     """
-    have = {r["name"] for r in conn.execute("PRAGMA table_info(recovery_case)").fetchall()}
-    if have and "is_holdout" not in have:
-        conn.execute(
-            "ALTER TABLE recovery_case ADD COLUMN is_holdout INTEGER NOT NULL DEFAULT 0"
-        )
+    def add_column(table: str, column: str, ddl: str) -> None:
+        have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if have and column not in have:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+    add_column("recovery_case", "is_holdout", "INTEGER NOT NULL DEFAULT 0")
+    # Economics: what a decision expected to gain, and what an execution cost.
+    add_column("intervention_decision", "ev_paise", "INTEGER")
+    add_column("intervention_decision", "ev_detail", "TEXT")
+    add_column("execution_record", "cost_paise", "INTEGER NOT NULL DEFAULT 0")
+    # Audit tamper-evidence. Nullable on purpose: rows written before the chain
+    # existed cannot be retro-hashed without inventing history, so they stay NULL and
+    # audit.verify() counts them as unchained instead of quietly declaring them valid.
+    add_column("audit_log", "prev_hash", "TEXT")
+    add_column("audit_log", "entry_hash", "TEXT")
 
 
 def reset(path: Optional[str] = None) -> sqlite3.Connection:

@@ -12,3 +12,4 @@ synthetic_cases.json
 *.db-shm
 *.db-wal
 graphify-out/
+docs/video-script.md
