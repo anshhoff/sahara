@@ -19,10 +19,16 @@ T0 = datetime(2026, 3, 2, 9, 0, 0, tzinfo=timezone.utc)
 
 @pytest.fixture(autouse=True)
 def no_live_calls():
-    """No test may spend a real test-mode Payment Link. The budget is process-global,
-    so a single test that forgot would quietly burn the account's rate limit for every
-    run after it."""
+    """No test may make a real test-mode call. The budgets are process-global, so a
+    single test that forgot would quietly burn the account's rate limit for every run
+    after it.
+
+    Both rungs of the update-link ladder are zeroed, not just Payment Links. A machine
+    with credentials in its environment picks them up through `.env`, and the Order rung
+    would otherwise succeed where the Payment Link rung merely failed — a live call that
+    happens to work is worse in a test suite than one that reliably does not."""
     executor.set_live_link_budget(0)
+    executor.set_live_order_budget(0)
     yield
 
 

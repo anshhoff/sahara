@@ -3,23 +3,30 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="dark light">
-<title>Recovery Agent — Operator Console</title>
+<meta name="color-scheme" content="light">
+<title>Sahara — Recovery Console</title>
+<link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png">
+<link rel="icon" type="image/png" sizes="512x512" href="assets/favicon-512.png">
 <!--
   Operator console over the SQLite data (docs/06), plus a control room that runs the
   suite, the batch and the adversarial storms without a terminal (app/control.py).
 
   App shell: a fixed rail and one view at a time, routed on the URL hash, so every view
-  is a shareable link. Each view answers exactly one question — nothing is a wall of
-  scroll. The Mechanism views render whatever /api/mechanism returns rather than
-  restating the rules here: a gate described in one place and enforced in another
-  eventually describes something the code no longer does.
+  is a shareable link. Five destinations, not nine — the four "how it works" pages ask
+  adjacent questions and now sit behind tabs inside one view, addressed as
+  #/mechanism:policy. Each destination answers exactly one question, stated under its
+  title, so nothing has to be inferred from a chart.
+
+  The Mechanism views render whatever /api/mechanism returns rather than restating the
+  rules here: a gate described in one place and enforced in another eventually
+  describes something the code no longer does.
 
   Deliberate non-goals, do not add them: no auth, no build step, no CDN, no webfont —
   the demo must survive a dead conference network. Charts are hand-built SVG, so there
-  is no charting dependency. Icons are an inline sprite, never emoji.
+  is no charting dependency. Icons are an inline sprite, never emoji. One light theme,
+  no toggle.
 -->
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=3">
 </head>
 <body>
 
@@ -86,14 +93,14 @@
     <g id="i-x" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
       <path d="M6 6l12 12M18 6L6 18"/>
     </g>
-    <g id="i-theme" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
-      <circle cx="12" cy="12" r="5"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"/>
-    </g>
     <g id="i-arrow" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
       <path d="M5 12h14M13 6l6 6-6 6"/>
     </g>
     <g id="i-trace" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
       <circle cx="11" cy="11" r="7"/><path d="M16 16l5 5"/>
+    </g>
+    <g id="i-book" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 5a2 2 0 0 1 2-2h13v18H6a2 2 0 0 1-2-2z"/><path d="M8 7h7M8 11h7"/>
     </g>
   </defs>
 </svg>
@@ -105,28 +112,20 @@
   <!-- ================================================================ rail -->
   <aside class="rail">
     <div class="brand">
-      <div class="mark" aria-hidden="true">₹</div>
+      <div class="mark" aria-hidden="true"><img src="assets/sahara-mark.png" alt=""></div>
       <div>
-        <div class="brand-name">Recovery Agent</div>
-        <div class="brand-sub">Buildathon · Track 03</div>
+        <div class="brand-name">Sahara</div>
+        <div class="brand-sub">Failed subscription recovery agent</div>
       </div>
     </div>
 
     <nav class="nav" id="nav" aria-label="Console sections">
-      <div class="nav-group">Results</div>
-      <a href="#/overview" data-view="overview"><svg class="icon"><use href="#i-overview"/></svg>Overview</a>
-      <a href="#/impact"   data-view="impact"><svg class="icon"><use href="#i-impact"/></svg>Incremental impact<em id="nav-impact"></em></a>
-      <a href="#/causes"   data-view="causes"><svg class="icon"><use href="#i-causes"/></svg>By failure cause</a>
-
-      <div class="nav-group">Mechanism</div>
-      <a href="#/pipeline"   data-view="pipeline"><svg class="icon"><use href="#i-pipeline"/></svg>Pipeline</a>
-      <a href="#/guardrails" data-view="guardrails"><svg class="icon"><use href="#i-shield"/></svg>Guardrails<em id="nav-guards"></em></a>
-      <a href="#/policy"     data-view="policy"><svg class="icon"><use href="#i-policy"/></svg>Decision policy</a>
-      <a href="#/model"      data-view="model"><svg class="icon"><use href="#i-model"/></svg>Model boundary</a>
-
-      <div class="nav-group">Operate</div>
-      <a href="#/cases"   data-view="cases"><svg class="icon"><use href="#i-cases"/></svg>Cases<em id="nav-cases"></em></a>
-      <a href="#/control" data-view="control"><svg class="icon"><use href="#i-control"/></svg>Control room<em id="nav-control"></em></a>
+      <a href="#/overview"  data-view="overview"><svg class="icon"><use href="#i-overview"/></svg>Overview</a>
+      <a href="#/results"   data-view="results"><svg class="icon"><use href="#i-impact"/></svg>Results<em id="nav-results"></em></a>
+      <a href="#/mechanism" data-view="mechanism"><svg class="icon"><use href="#i-book"/></svg>How it works<em id="nav-mechanism"></em></a>
+      <a href="#/cases"     data-view="cases"><svg class="icon"><use href="#i-cases"/></svg>Cases<em id="nav-cases"></em></a>
+      <a href="#/control"   data-view="control"><svg class="icon"><use href="#i-control"/></svg>Control room<em id="nav-control"></em></a>
+      <a href="#/livedemo"  data-view="livedemo"><svg class="icon"><use href="#i-bolt"/></svg>Test mode</a>
     </nav>
 
     <div class="rail-foot">
@@ -143,9 +142,6 @@
         <p class="view-q" id="view-q"></p>
       </div>
       <div class="top-actions">
-        <button id="theme" class="btn icon-only ghost" type="button" title="Switch theme" aria-label="Switch colour theme">
-          <svg class="icon"><use href="#i-theme"/></svg>
-        </button>
         <button id="tick" class="btn ghost" type="button" title="Run one iteration of the agent loop now">
           <svg class="icon"><use href="#i-clock"/></svg>Tick
         </button>
@@ -163,7 +159,7 @@
       <!-- ------------------------------------------------------- overview -->
       <section class="view" data-view="overview" aria-label="Overview">
         <div id="tiles" class="tiles"></div>
-        <div class="grid-2" style="margin-top:14px">
+        <div class="grid-2" style="margin-top:16px">
           <div class="panel">
             <div class="panel-head"><h2>Where every case ended</h2>
               <span class="spacer"></span><span class="muted" id="outcome-n"></span></div>
@@ -171,94 +167,159 @@
           </div>
           <div class="panel">
             <div class="panel-head"><h2>Headline effect</h2>
-              <span class="spacer"></span><a class="link" href="#/impact">See the experiment →</a></div>
+              <span class="spacer"></span><a class="link" href="#/results">See the experiment →</a></div>
             <div class="panel-body" id="effect-mini"></div>
           </div>
         </div>
-        <div class="panel">
-          <div class="panel-head"><h2>Loop, as row counts</h2>
-            <span class="spacer"></span><a class="link" href="#/pipeline">Open pipeline →</a></div>
+        <div class="panel" style="margin-top:16px">
+          <div class="panel-head"><h2>The loop, as row counts</h2>
+            <span class="spacer"></span><a class="link" href="#/mechanism:pipeline">Open pipeline →</a></div>
           <div class="panel-body"><div class="flow" id="flow-mini"></div></div>
         </div>
       </section>
 
-      <!-- --------------------------------------------------------- impact -->
-      <section class="view" data-view="impact" aria-label="Incremental impact">
-        <p class="lede">
-          Gross recovery cannot separate money the agent won from money that would have come back
-          anyway — some failed charges recover on their own when a customer tops up or an issuer stops
-          declining. A randomised slice of cases is therefore <em>held out</em>: detected and diagnosed
-          like any other, then never intervened on. The gap between the arms is the agent's effect.
-        </p>
-        <div class="panel" id="effect-panel"></div>
-      </section>
+      <!-- -------------------------------------------------------- results -->
+      <section class="view" data-view="results" aria-label="Results">
+        <nav class="subnav" data-sub-for="results" aria-label="Results sections">
+          <a href="#/results:impact" data-sub="impact">Incremental impact</a>
+          <a href="#/results:causes" data-sub="causes">By failure cause</a>
+        </nav>
 
-      <!-- --------------------------------------------------------- causes -->
-      <section class="view" data-view="causes" aria-label="By failure cause">
-        <p class="lede">Not every failure is equally recoverable. An expired card does not un-expire;
-          an empty account often refills by payday.</p>
-        <div class="panel">
-          <div class="panel-head"><h2>Recovery by diagnosed cause</h2></div>
-          <table id="categories" class="grid">
-            <thead>
-              <tr>
-                <th>Cause</th><th class="num">Cases</th><th class="num">Recovered</th>
-                <th class="num">Rate</th><th class="num">₹ at risk</th><th class="num">₹ recovered</th>
-                <th class="bar-col">Recovery rate</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
+        <div class="subview" data-sub="impact">
+          <p class="lede">
+            Gross recovery cannot separate money the agent won from money that would have come back
+            anyway — some failed charges recover on their own when a customer tops up or an issuer stops
+            declining. A randomised slice of cases is therefore <em>held out</em>: detected and diagnosed
+            like any other, then never intervened on. The gap between the arms is the agent's effect.
+          </p>
+          <div class="panel" id="effect-panel"></div>
+
+          <div class="panel" style="margin-top:18px">
+            <div class="panel-head"><h2>Lift by cause</h2><span class="spacer"></span>
+              <span class="muted">including where the agent is flat</span></div>
+            <div class="panel-body">
+              <p class="lede" style="margin-top:0">
+                A table in which every row is a win is a table nobody should believe. Arm counts are on every
+                row: a lift over eight cases and a lift over eight hundred are not the same claim.
+              </p>
+              <div id="lift-by-category"></div>
+            </div>
+          </div>
+
+          <div class="panel" style="margin-top:18px">
+            <div class="panel-head"><h2>Are the agent&rsquo;s own priors any good?</h2>
+              <span class="spacer"></span><span class="muted" id="calibration-head"></span></div>
+            <div class="panel-body">
+              <p class="lede" style="margin-top:0">
+                <code>P_RECOVER_PRIOR</code> decides which interventions fire and which cases go to a
+                person. Until now it had never been checked against a single realised outcome — a number
+                that decides where money goes and has never been scored is an assumption wearing a
+                measurement&rsquo;s clothes.
+              </p>
+              <div id="calibration"></div>
+            </div>
+          </div>
+
+          <div class="panel" style="margin-top:18px">
+            <div class="panel-head"><h2>What the agent declined to do</h2><span class="spacer"></span>
+              <span class="muted" id="declined-head"></span></div>
+            <div class="panel-body"><div id="declined"></div></div>
+          </div>
+        </div>
+
+        <div class="subview" data-sub="causes">
+          <p class="lede">Not every failure is equally recoverable. An expired card does not un-expire;
+            an empty account often refills by payday.</p>
+          <div class="panel">
+            <div class="panel-head"><h2>Recovery by diagnosed cause</h2>
+              <span class="spacer"></span><span class="muted">click a cause to filter the case list</span></div>
+            <table id="categories" class="grid">
+              <thead>
+                <tr>
+                  <th>Cause</th><th class="num">Cases</th><th class="num">Recovered</th>
+                  <th class="num">Rate</th><th class="num">₹ at risk</th><th class="num">₹ recovered</th>
+                  <th class="bar-col">Recovery rate</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
         </div>
       </section>
 
-      <!-- ------------------------------------------------------- pipeline -->
-      <section class="view" data-view="pipeline" aria-label="Pipeline">
-        <p class="lede">
-          Every number here is a row count in the database. Two gates sit inside the loop — one before a
-          decision is made, one immediately before it executes — because state can change in between.
-        </p>
-        <div class="panel"><div class="panel-body"><div class="flow" id="flow"></div></div></div>
-        <div class="panel" id="funnel-notes"></div>
-      </section>
+      <!-- ------------------------------------------------------ mechanism -->
+      <section class="view" data-view="mechanism" aria-label="How it works">
+        <nav class="subnav" data-sub-for="mechanism" aria-label="Mechanism sections">
+          <a href="#/mechanism:pipeline"   data-sub="pipeline">Pipeline</a>
+          <a href="#/mechanism:guardrails" data-sub="guardrails">Guardrails</a>
+          <a href="#/mechanism:policy"     data-sub="policy">Decision policy</a>
+          <a href="#/mechanism:model"      data-sub="model">Model boundary</a>
+        </nav>
 
-      <!-- ----------------------------------------------------- guardrails -->
-      <section class="view" data-view="guardrails" aria-label="Guardrails">
-        <p class="lede">
-          Four invariants, enforced in a module that imports neither the policy table nor the model — so a
-          wrong policy cell cannot route around them and no model output can reach them. They run before a
-          decision <em>and</em> again before execution. The counts are live.
-        </p>
-        <div class="guards" id="guards"></div>
-      </section>
-
-      <!-- --------------------------------------------------------- policy -->
-      <section class="view" data-view="policy" aria-label="Decision policy">
-        <p class="lede">
-          The intervention comes from a static table indexed by <code>(failure cause, attempt number)</code>.
-          It is total — every cell filled — so the lookup cannot fall through to a default, and every
-          decision records the exact cell it came from.
-        </p>
-        <div class="panel">
-          <div class="panel-head"><h2>Policy table</h2><span class="spacer"></span>
-            <span class="muted" id="policy-note"></span></div>
-          <div class="panel-body" style="overflow-x:auto"><table class="matrix" id="policy"></table>
-            <div class="legend" id="policy-legend"></div></div>
+        <!-- ....................................................... pipeline -->
+        <div class="subview" data-sub="pipeline">
+          <p class="lede">
+            Every number here is a row count in the database. Two gates sit inside the loop — one before a
+            decision is made, one immediately before it executes — because state can change in between.
+          </p>
+          <div class="panel"><div class="panel-body"><div class="flow" id="flow"></div></div></div>
+          <div class="panel" id="funnel-notes"></div>
         </div>
-        <div class="panel">
-          <div class="panel-head"><h2>Diagnosis rules</h2><span class="spacer"></span>
-            <span class="muted">Rules first; the model sees only what they miss.</span></div>
-          <table class="grid" id="rules">
-            <thead><tr><th>Rule</th><th>Resolves to</th><th class="num">Matched</th><th>Patterns</th></tr></thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </section>
 
-      <!-- ---------------------------------------------------------- model -->
-      <section class="view" data-view="model" aria-label="Model boundary">
-        <p class="lede">Where the model is — and, more importantly, where it is not.</p>
-        <div id="boundary"></div>
+        <!-- ..................................................... guardrails -->
+        <div class="subview" data-sub="guardrails">
+          <p class="lede">
+            Every invariant below is enforced in a module that imports neither the policy table nor the model — so a
+            wrong policy cell cannot route around them and no model output can reach them. They run before a
+            decision <em>and</em> again before execution. The counts are live.
+          </p>
+          <div class="guards" id="guards"></div>
+
+          <div class="panel" style="margin-top:18px">
+            <div class="panel-head"><h2>Dispatch fencing</h2><span class="spacer"></span>
+              <span class="muted" id="fence-claim"></span></div>
+            <div class="panel-body">
+              <p class="lede" style="margin-top:0">
+                Every invariant above re-reads the <em>case</em> — our record of the world, exactly as stale as the
+                last webhook that happened to arrive. These three fences re-read the world itself, because between
+                deciding and acting the customer may already have paid. A fence <strong>degrades, it never
+                raises</strong>: when it cannot reach the truth it records <code>unverified</code> and lets the
+                dispatch through, so &ldquo;we did not check&rdquo; is never mistaken for &ldquo;we checked and it
+                was fine.&rdquo;
+              </p>
+              <div id="fences"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ......................................................... policy -->
+        <div class="subview" data-sub="policy">
+          <p class="lede">
+            The intervention comes from a static table indexed by <code>(failure cause, attempt number)</code>.
+            It is total — every cell filled — so the lookup cannot fall through to a default, and every
+            decision records the exact cell it came from.
+          </p>
+          <div class="panel">
+            <div class="panel-head"><h2>Policy table</h2><span class="spacer"></span>
+              <span class="muted" id="policy-note"></span></div>
+            <div class="panel-body" style="overflow-x:auto"><table class="matrix" id="policy"></table>
+              <div class="legend" id="policy-legend"></div></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>Diagnosis rules</h2><span class="spacer"></span>
+              <span class="muted">Rules first; the model sees only what they miss.</span></div>
+            <table class="grid" id="rules">
+              <thead><tr><th>Rule</th><th>Resolves to</th><th class="num">Matched</th><th>Patterns</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- .......................................................... model -->
+        <div class="subview" data-sub="model">
+          <p class="lede">Where the model is — and, more importantly, where it is not.</p>
+          <div id="boundary"></div>
+        </div>
       </section>
 
       <!-- ---------------------------------------------------------- cases -->
@@ -299,9 +360,9 @@
           </div>
         </div>
         <p class="foot-note">
-          A stopped case is a deliverable, not a failure — the case file is the artifact a human picks up.
-          Every number on this page is a SQL query over <code>recovery.db</code>; trace one with
-          <code>GET /api/metrics/trace/recovered</code>.
+          Click any row for its complete case file. A stopped case is a deliverable, not a failure — the
+          case file is the artifact a human picks up. Every number on this page is a SQL query over
+          <code>recovery.db</code>; trace one with <code>GET /api/metrics/trace/recovered</code>.
         </p>
       </section>
 
@@ -376,7 +437,7 @@
           </div>
         </div>
 
-        <div class="panel" style="margin-top:14px">
+        <div class="panel" style="margin-top:16px">
           <div class="panel-head">
             <h2>Console</h2>
             <span class="badge" id="job-status">idle</span>
@@ -387,6 +448,80 @@
           </div>
           <pre class="console" id="console" aria-live="polite" aria-label="Command output"><span class="console-empty">No run yet. Pick an action above — output streams here as it happens.</span></pre>
           <div id="job-result"></div>
+        </div>
+      </section>
+
+      <section class="view" data-view="livedemo" aria-label="Test mode">
+        <p class="lede">
+          A real Razorpay test-mode Order, watched against the running server — not a replay. Fail it
+          and Sahara's actual webhook receiver, diagnosis and decision run on it, exactly like a live
+          delivery would.
+        </p>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Want the realistic version?</h2>
+          </div>
+          <div class="panel-body">
+            <p style="margin:0 0 12px; font-size:12px; color:var(--text-2); line-height:1.6">
+              A plain subscribe-and-pay page, told from the customer's side — no stage names, no rule
+              IDs. One real Razorpay failure seeds the case; simple "it worked" / "it didn't" buttons
+              stand in for whatever real-world signal Sahara would eventually get on its own, so you can
+              walk a case through all 3 attempts without fighting checkout each time.
+            </p>
+            <a class="btn primary" href="/subscribe.html" target="_blank" style="text-decoration:none; display:inline-flex">
+              Open the subscribe demo <svg class="icon"><use href="#i-arrow"/></svg>
+            </a>
+          </div>
+        </div>
+
+        <p class="lede" style="margin-top:24px">
+          The two panels below are the raw developer shortcuts the subscribe demo is built on top of —
+          useful for poking at one specific rule directly.
+        </p>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Developer shortcut — real checkout</h2>
+          </div>
+          <div class="panel-body">
+            <ol class="steps-list">
+              <li>Click "Pay ₹499" — creates a real Order and opens a pipeline tab that watches its
+                case update live.</li>
+              <li>In checkout, fail the payment any way it lets you. Netbanking's mock failure
+                ("declined by the bank") maps to a known rule; Wallet's generic "temporary issue"
+                does not, and Sahara will honestly stop rather than guess at it.</li>
+              <li>The pipeline tab updates within ~1s of each webhook. Its "Fast-forward to next
+                action" button skips real wall-clock delays instead of waiting hours between attempts.</li>
+            </ol>
+            <button class="btn primary" id="livedemo-pay" type="button">
+              <svg class="icon"><use href="#i-play"/></svg>Pay ₹499
+            </button>
+            <div class="cmd" id="livedemo-status" style="margin-top:10px; white-space:pre-wrap"></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Developer shortcut — inject a category directly</h2>
+          </div>
+          <div class="panel-body">
+            <p class="lede" style="margin-bottom:12px">
+              Razorpay's test-mode checkout only offers a few fixed decline reasons, so it can't
+              reliably reach every rule. This pushes the same shape of <code>payment.failed</code>
+              body through <code>intake()</code> — the identical function a live webhook calls,
+              with <code>source="synthetic"</code> the only difference — so you can watch any of
+              the six diagnosed categories run the pipeline live, on demand.
+            </p>
+            <div class="row">
+              <select id="livedemo-category" aria-label="Failure cause to inject"></select>
+              <label>₹ <input id="livedemo-amount" type="number" value="499" min="1" step="1"></label>
+              <button class="btn primary" id="run-livedemo-inject" type="button">
+                <svg class="icon"><use href="#i-inject"/></svg>Inject
+              </button>
+            </div>
+            <div class="cmd" id="livedemo-inject-status" style="margin-top:10px; white-space:pre-wrap"></div>
+          </div>
         </div>
       </section>
     </main>
@@ -407,6 +542,7 @@
 
 <div class="toasts" id="toasts" role="status" aria-live="polite" aria-atomic="false"></div>
 
+<script src="https://checkout.razorpay.com/v1/checkout.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

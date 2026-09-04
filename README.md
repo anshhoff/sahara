@@ -1,5 +1,7 @@
-# Failed Subscription Recovery Agent
-*Razorpay AI Buildathon — Track 03: AI Revenue Recovery*
+<p align="center"><img src="dashboard/assets/sahara-mark.png" alt="Sahara" width="96"></p>
+
+# Sahara
+*Failed Subscription Recovery Agent — Razorpay AI Buildathon, Track 03: AI Revenue Recovery*
 
 ## The problem
 
@@ -11,52 +13,106 @@ window — the first hours and days after failure — is exactly when nothing ha
 
 Detects a failed Razorpay Subscription charge via webhook, diagnoses why it failed
 (6 fixed categories), picks ONE intervention from a deterministic policy table
-(retry later / update-payment link / promise-to-pay / stop-and-handoff), executes it
-against Razorpay test-mode APIs, and stops when hard rules say stop. Every step is
-audited; every reported rupee traces to case IDs.
+(retry later / update-payment link / promise-to-pay / stop-and-handoff), prices it
+before taking it, executes it against Razorpay test-mode APIs, and stops when hard
+rules say stop. Every step is audited into a hash-chained trail; every reported rupee
+traces to case IDs, is measured against a randomised control arm, and is reported net
+of what it cost to recover.
 
 ```
 webhook ─▶ DETECT ─▶ DIAGNOSE ─▶ [STOP GATE] ─▶ DECIDE ─▶ [STOP GATE] ─▶ EXECUTE ─▶ OUTCOME
-           verify     rules R1–R7   I1–I4        static     I1–I4         test-mode   recovery
+           verify     rules R1–R7   I1–I7        static     I1–I7         test-mode   recovery
            dedupe     else model    pre-decision  policy    pre-execution  API +       signal or
-           route      → 6-value     gate          table     gate           simulated   next failure
-                        enum                                              notification
+           route      → 6-value     gate          table      gate          simulated   next failure
+                        enum                     + E1 EV                   notification
+                                                   gate
 ```
 
-## Results (89 cases: 88 synthetic [seed 42] + 1 live test-mode)
+## Results (88 synthetic cases, seed 42)
+
+The headline is **incremental, net of cost** — not gross. A randomised control arm is
+detected and diagnosed like every other case and then never intervened on, so the agent
+is credited only with recovery that would not have happened anyway; every rupee it spent
+getting there is then subtracted.
+
+<!-- BEGIN RESULTS — verified by scripts/verify_numbers.py; editing a digit here turns CI red -->
 
 | Metric | Value |
 |---|---|
-| ₹ at risk | ₹72,911 across 89 cases (₹72,412 synthetic + ₹499 live) |
-| ₹ recovered | ₹30,550 (56.8% of the 88 synthetic cases; 56.2% of all 89, the live case still being open) |
-| Avg time to recovery | 46.0 h (simulated clock for synthetic cases) |
-| Recovered | 50 |
-| stopped_opt_out | 2 |
-| stopped_unknown | 8 |
-| stopped_max_attempts | 0 — see note below |
-| stopped_cooldown_expired | 0 |
-| stopped_handoff (policy stop / lapsed promise) | 28 |
-| Still open | 1 — the live case, awaiting its 24 h retry |
-| Classification accuracy vs ground truth | 100% (84/84) rules path · 25% (1/4) model path, with **no model configured** |
+| ₹ at risk | ₹72,412 across 88 cases |
+| **Net incremental recovery** | **₹12,921** — 95% CI [₹5,640, ₹20,822] ✅ excludes zero |
+| **Lift, treated vs control** | **+49.8 pp**, 95% CI **[+31.0, +66.9] pp** ✅ excludes zero |
+| Recovery rate by arm | **69.2% (36/52)** treated · **19.4% (7/36)** control |
+| Incremental recovery, gross | ₹14,330 of the ₹21,157 gross recovered in the treated arm |
+| Total cost | ₹1,409 = ₹729 outreach (51 contacts) + ₹680 human queue (17 cases) |
+| Gross ₹ recovered | ₹21,157 (43 of 88 cases, 48.9%) |
+| Cost per ₹100 recovered | ₹6.66 |
+| **Cases deliberately not contacted** | **9** — plus 27 held out to measure the rest |
+| **Outreach to already-settled customers** | **0 of 51 dispatches fenced** |
+| Escalation ladder | 30 silent retries · 38 links · 4 promises · **9 voice calls** |
+| Dated promises the customer named | 4 — 2 kept, 2 broken |
+| Prior calibration | Brier **0.2581**, ECE **0.1064**, 81 of 81 executions scored |
+| Audit chain | intact — 545 entries, 0 unchained (`GET /api/audit/verify`) |
+| Classification accuracy vs ground truth | 100% (84/84) rules path · 25% (1/4) model path, **with no model configured** |
+| Acceptance checks | 20 of 20 pass · 241 tests green |
+
+<!-- END RESULTS -->
+
+Two more results, from runs of their own:
+
+| Claim | Value |
+|---|---|
+| **What the voice rung is worth** (n=2,010) | **+7.4 pp**, 95% CI **[+2.2, +12.5] pp** ✅ excludes zero |
+| The same rung, in rupees | ₹+49,519, 95% CI [−₹66,790, +₹168,596] ❌ **includes zero** |
+| **Model vs keyword rules** at reading a Hinglish promise | **90.0% vs 60.0%** on policy facts, McNemar **p = 0.0117** |
+
+> **The rate lift is a result. The rupee figure is not one yet**, and quoting the first
+> while the second spans zero is forbidden by [the analysis plan](docs/analysis-plan.md).
+> Ticket sizes span ₹199 to ₹4,999, so a per-case money estimate needs far more cases
+> before it settles.
 
 Reproduce, with no accounts, no API keys and no model download:
 
 ```bash
 python scripts/generate_synthetic.py --n 80 --seed 42 --out synthetic_cases.json
-LLM_PROVIDER=none python scripts/run_batch.py --cases synthetic_cases.json --db recovery.db
+LLM_PROVIDER=none python scripts/run_batch.py --cases synthetic_cases.json --db recovery.db \
+    --seed 42 --holdout 0.35
 ```
 
-That reproduces the 88 synthetic rows exactly. It does **not** reproduce the 89th — the
-live case needs a Razorpay test key and the webhook secret (see "The one live case").
-`/api/summary` always reports the split as `n_synthetic` / `n_live`, and gives both a
-synthetic-denominator `rate` and an all-cases `strict_rate`, so the two are never
-silently blended.
+**Then check that this table has not drifted from the code:**
+
+```bash
+python scripts/verify_numbers.py --check
+```
+
+That re-runs the batch from the seed in a throwaway database, extracts all 118 published
+values, and byte-compares them against `docs/verified-numbers.json`. Editing a digit in
+the table above makes it — and CI — exit non-zero. See [VERIFY.md](VERIFY.md) for every
+claim mapped to the artifact that proves it, and [THREAT-MODEL.md](THREAT-MODEL.md) for
+what this system structurally cannot do.
 
 Trace any number: `GET /api/metrics/trace/recovered` returns the exact case IDs behind
-it, and each of those IDs drills down to an `outcome` entry in its audit trail.
+it, and each of those IDs drills down to an `outcome` entry in its audit trail. Verify
+the trail has not been edited since: `GET /api/audit/verify`.
+
+### Where every case ended
+
+| Terminal state | n |
+|---|---|
+| recovered | 43 |
+| stopped_holdout (control arm, observed for the full window) | 27 |
+| stopped_handoff (policy stop, lapsed promise, or a broken promise-to-pay) | 9 |
+| stopped_unknown (I4 — the cause could not be diagnosed and the agent does not guess) | 8 |
+| stopped_opt_out | 1 |
+| stopped_max_attempts · stopped_cooldown_expired · stopped_suppressed · stopped_uneconomic · stopped_already_settled · stopped_unverified_recipient | 0 each |
+| still open | 0 |
 
 Reading the table honestly:
 
+- **The lift is the claim; the money interval is not.** The rate lift excludes zero by
+  a wide margin. The *rupee* interval does not, because ticket sizes span ₹199 to
+  ₹4,999 and 88 cases is too few for a per-case-money estimate to settle. Both are
+  reported. Quoting only the first would be the easy dishonesty here.
 - **The 4 model-path cases are cases the rules could not reach.** The frozen run above
   used `LLM_PROVIDER=none`, so all four collapsed to `unknown` and stopped. One of them
   genuinely *was* unknown, hence 1/4. With a model configured, those are the cases it
@@ -67,12 +123,50 @@ Reading the table honestly:
   table takes; `tests/test_invariants.py` drives a case to the cap directly and asserts
   I1 fires. `SYNTH-E-03` is the batch's version of the same story: exactly 3 attempts,
   then a stop, and a fourth attempt is impossible.
-- **The 28 handed-off cases are a deliverable, not a failure.** Each one has a complete
-  case file at `GET /api/cases/{id}` — that response *is* the handoff artifact.
+- **`stopped_uneconomic` is 0, and it is a different 0 than it used to be.** The EV
+  gate now prices each action against **what the case would do instead** rather than
+  against zero — at the final rung that is the ₹40 human queue, not abandonment. A
+  refusal there therefore closes as `stopped_handoff`, because taking the ₹40 out of
+  the comparison *after* using it to win the comparison would quietly abandon a case
+  the arithmetic said was worth a person. Before that fix the gate refused every voice
+  call ever proposed. `tests/test_economics.py` drives a case the gate does stop.
+- **The 17 cases in the human queue are a deliverable, not a failure.** Each has a
+  complete case file at `GET /api/cases/{id}` — that response *is* the handoff artifact,
+  and `/queue` in the Next.js console is the screen for it — and each is charged ₹40 of
+  human queue time in the cost table above, so handing a hard case to a person is never
+  free. 8 of those 17 are `stopped_unknown`: the agent refused to guess a cause it could
+  not diagnose, which is both the correct behaviour and exactly the case a person is
+  better at than a rule table.
+- **Voice fired 9 times and never dialled anybody.** Every call is composed, priced,
+  gated by I1–I8 and recorded as `simulated`. The mode that would mean a real
+  transmission, `plivo_trial_verified`, reads 0 in every run because it is 0 — and a
+  synthetic customer has no phone number anywhere in this system, so I8 cannot be
+  satisfied by one. See [THREAT-MODEL.md](THREAT-MODEL.md).
 - **Outcome probabilities are modelling assumptions, not measured industry data**
-  (`scripts/run_batch.py`, `SUCCESS_PROBABILITY`). The measured thing here is the
-  *mechanism*: synthetic cases traverse the identical code path as live webhooks,
-  entering only through `intake()` and advancing only through `tick()`.
+  (`scripts/run_batch.py`, `SUCCESS_PROBABILITY` and `BASELINE_RECOVERY_PROBABILITY`).
+  So are the costs and the agent's own priors (`app/config.py`). The measured thing
+  here is the *mechanism*: synthetic cases traverse the identical code path as live
+  webhooks, entering only through `intake()` and advancing only through `tick()`.
+
+## Screenshots
+
+The Next.js console (`cd web && npm run dev`), pointed at a populated `recovery.db`.
+
+| Overview — the headline, net of cost | Control room — reproduce and replay |
+|---|---|
+| ![Overview](docs/screenshots/overview.jpg) | ![Control room](docs/screenshots/control-room.jpg) |
+
+| Cases — every headline number resolves to this list | Results — one primary metric, one secondary |
+|---|---|
+| ![Cases](docs/screenshots/cases.jpg) | ![Results](docs/screenshots/results.jpg) |
+
+### Codebase graph
+
+Generated from this repo's own source — 916 nodes, 2,131 edges, 62 detected
+communities, from the executor and audit-chain core out through the docs and the
+Next.js console:
+
+![Codebase knowledge graph](docs/screenshots/knowledge-graph.jpg)
 
 ## The one live case
 
@@ -130,12 +224,15 @@ calls are deterministic code with hardcoded bounds.
 | Failure classification, ambiguous cases | **LLM**, output forced into the enum; `< 0.8` confidence → `unknown` |
 | Intervention choice | Static `(category, attempt) → action` table |
 | Retry timing | Hardcoded delays per policy row |
-| Stopping rules I1–I4 | Independent module, run before every decision *and* every execution |
+| Stopping rules I1–I7 | Independent module, run before every decision *and* every execution |
+| Whether an intervention is worth its cost | Deterministic EV arithmetic over stated priors (gate E1) |
 | Message copy | **LLM** drafts; deterministic validator; static template on rejection |
 | Money-moving execution | Deterministic executor calling Razorpay test-mode APIs |
 
 The bounds, in one line: **at most 3 attempts per case, at least 24 h between customer
-contacts, opt-out stops everything, an unknown cause is never acted on.**
+contacts, nothing between 21:00 and 09:00 IST, at most 2 contacts per customer per day,
+one opt-out silences every subscription that person holds, an unknown cause is never
+acted on, and no message is sent whose expected value is negative.**
 
 Checkable claims, not assertions:
 
@@ -154,10 +251,107 @@ attempts and fully audited — or an invalid output, which stops the case. Proof
 frozen batch above ran with `LLM_PROVIDER=none` and every case still completed,
 audited and bounded.
 
+## What the agent refuses to do
+
+Seven invariants and one economics gate. They are split into three kinds on purpose,
+because "the agent stopped" means something different in each, and a panel that shows
+them as one undifferentiated list is hiding that.
+
+| | Rule | On violation |
+|---|---|---|
+| **Safety** — non-negotiable | | |
+| I1 | at most 3 executed attempts per case | stop |
+| I2 | at least 24 h between two contacts on one case | defer |
+| I3 | an opted-out customer is never contacted or charged | stop |
+| I4 | an unknown failure cause is never acted on | stop |
+| **Contact hygiene** — the person, not the case | | |
+| I5 | nothing sent between 21:00 and 09:00 IST | defer to 09:00 IST |
+| I6 | a suppressed customer is silent on *every* subscription they hold | stop |
+| I7 | ≤ 2 contacts per customer per IST day; ≤ ₹5,000/day outreach system-wide | defer |
+| **Economics** — a judgement, not a rule | | |
+| E1 | an intervention whose expected value is negative is never executed | stop |
+
+I5–I7 exist because I1–I4 bound the agent **per case**, and a customer is not a case.
+One person with two failing subscriptions has two cases, two attempt budgets and two
+independent 24 h cooldowns — and nothing in the original four would have stopped both
+of them messaging at 2am on the same night. I6 is the same gap for consent: an opt-out
+recorded on one subscription now silences the others, including cases that do not exist
+yet, and it gates the *silent* mandate re-charge too. Someone who asked to be left alone
+was not asking to be left alone noisily.
+
+When several timing gates apply to one contact, the verdict is the **latest** of their
+targets, not whichever ran first. Returning on the first deferral would schedule a
+contact for a moment a later gate also forbids, and that bug only shows up at 3am.
+
+### Pricing an intervention
+
+Gross recovery is the number every dunning tool reports, and the one number that cannot
+go down by sending more messages. That is exactly what makes it the wrong headline: a
+system optimising it concludes the marginal message is free. So every decision is priced
+before it is taken —
+
+```
+EV = p_recover × amount_at_risk  −  direct_cost  −  annoyance_cost
+                                                    (hazard(attempt) × 12 months × amount)
+```
+
+— and `ev_paise` plus the full breakdown is written onto **every** decision, including
+the ones that went ahead. The stop is the backstop; the record is the point. A reader
+can audit the arithmetic behind an action the agent took, not only one it declined, and
+disagree with the priors, because the priors are in `app/config.py` where they can be
+read and argued with.
+
+| Assumption | Value | Why |
+|---|---|---|
+| Contact cost | ₹12 | ₹0.25 to send, plus ~4% chance of an inbound support contact at ~₹300 |
+| Retry cost | ₹0 | a silent mandate re-charge contacts nobody |
+| Handoff cost | ₹40 | a case in a human queue is not free, and a system that could make hard cases vanish at zero cost would be measuring the wrong thing |
+| Contact churn hazard | 0.4% / 1.0% / 2.0% by attempt | each successive unsolicited payment message raises the chance of an outright cancellation |
+| LTV horizon | 12 months | deliberately modest; a longer one inflates the annoyance term and makes the agent look more restrained than the evidence supports |
+
+Every one of those is an assumption with a stated rationale and no measurement behind
+it, exactly like the batch's outcome model — and it is written down here rather than
+buried, because a cost model presented as fact is worse than no cost model.
+
+**The annoyance term prices decisions but is never booked as a cost.** It is a modelled
+risk; no rupee leaves the account for it. `metrics.costs()` counts only money that
+actually moved, so the net ledger is made of rupees rather than opinions.
+
+**The agent's priors are deliberately not the simulator's outcome model.**
+`config.P_RECOVER_PRIOR` is what the agent believes before acting;
+`run_batch.SUCCESS_PROBABILITY` is what actually happens in the simulated world. If they
+were the same table the agent would be scoring its own decisions with the answer key,
+every EV would be correct by construction, and the measurement would be circular.
+`tests/test_economics.py` asserts the two tables differ *and* that nothing in `app/`
+imports the simulator — a value test can be satisfied by nudging a number; an import
+grep cannot.
+
+### The audit trail is tamper-evident, not just append-only
+
+Append-only is a promise about the code, enforced by a grep. The chain is a property of
+the data: every entry carries
+`sha256(prev_hash ‖ canonical_json(case_id, seq, stage, actor, summary, detail, created_at, synthetic))`,
+so editing one word of one summary — or deleting one row — invalidates every hash after
+it. `GET /api/audit/verify` recomputes the whole chain and names the first break.
+
+The chain spans the **whole log** in insertion order rather than running per case. A
+per-case chain catches an edit inside a trail and misses the deletion of an entire
+trail, which is the more attractive thing to delete: it removes the inconvenient number
+from the metrics as well as its explanation. `head` is a one-line fingerprint of one database: copy it before handing the file to
+someone, and you can tell afterwards whether anything in it moved. It is deliberately
+**not** a reproducibility check — case ids carry a random ULID tail, so two clean-room
+runs of the same seed produce identical *numbers* and different *hashes*. The seeded
+metrics are what reproduce; the hash is what detects tampering.
+
+`tests/test_audit_chain.py` covers the interesting attack, not only the naive one:
+someone who reads `audit.py` and recomputes the hash of the row they edited still fails
+verification, because every later row was hashed against the old value.
+
+
 ## Architecture
 
 One FastAPI process serves the webhook receiver, the JSON API and the static
-dashboard. One SQLite file holds seven tables. There is no job queue: `RETRY_LATER`
+dashboard. One SQLite file holds eight tables. There is no job queue: `RETRY_LATER`
 decisions write a `scheduled_for` timestamp, and a `tick()` scan executes what is due —
 every 30 s in live mode, and directly against a **simulated clock** in batch mode, so a
 14-day recovery episode resolves in milliseconds through the same code path.
@@ -173,12 +367,13 @@ app/
   diagnosis.py   rule table, then the model                             (Diagnose)
   llm.py         the ONLY module importing the model client             (2 leaf calls)
   policy.py      static table lookup                                    (Decide)
-  invariants.py  I1–I4, pre-decision and pre-execution gates            (Stop)
+  invariants.py  I1–I7, pre-decision and pre-execution gates            (Stop)
+  economics.py   expected value of an intervention, and what it costs   (Gate E1)
   executor.py    Razorpay calls, simulated notifications, copy validate, tick()
-  audit.py       append-only audit writer
+  audit.py       append-only audit writer + SHA-256 hash chain
   metrics.py     every metric as (value, case_ids)
   api.py         dashboard JSON endpoints
-schema.sql       seven tables, with CHECK constraints as the enum backstop
+schema.sql       eight tables, with CHECK constraints as the enum backstop
 scripts/         generate_synthetic.py, run_batch.py, check_llm.py
 dashboard/       static HTML + vanilla JS + one CSS file, no build step
 tests/           98 tests: rules, policy matrix, invariants, copy validator, boundary, API
@@ -245,6 +440,7 @@ the clock that created them — the batch runner, or an operator pressing Tick.
 | `LLM_COPY_ENABLED` | Kill-switch forcing static templates | optional, defaults to `true` |
 | `LIVE_LINKS_MAX` | Cap on real test-mode Payment Links | optional, defaults to `5` |
 | `CONTROL_API_ENABLED` | Dashboard control room (tests / batch / storms) | optional, defaults to `true`; set `false` for anything not on localhost |
+| `DAILY_OUTREACH_BUDGET_PAISE` | The I7 system-wide daily spend ceiling | optional, defaults to `500000` (₹5,000). At demo scale it does not bind; lower it to watch it defer |
 
 Never put live-mode keys anywhere in this project. `.env` is gitignored;
 `.env.example` holds placeholders only.
@@ -327,6 +523,16 @@ curl -s localhost:8000/api/summary | python -m json.tool
 sqlite3 recovery.db "SELECT status, COUNT(*), SUM(amount_at_risk_paise)
                      FROM recovery_case GROUP BY status;"
 curl -s localhost:8000/api/metrics/trace/recovered
+curl -s localhost:8000/api/audit/verify        # -> {"status":"intact", ...}
+```
+
+And the audit trail is checkable by someone who does not trust the code. Edit one word
+of one entry with `sqlite3` and the chain reports the row it happened on:
+
+```bash
+sqlite3 recovery.db "UPDATE audit_log SET summary = 'nothing to see here'
+                     WHERE id = (SELECT MIN(id) FROM audit_log);"
+curl -s localhost:8000/api/audit/verify        # -> {"status":"broken","first_break":{...}}
 ```
 
 Two consecutive clean-room runs on the same seed produce identical numbers; batch
@@ -386,13 +592,78 @@ written first, as the claim token, and a lost race is answered as a duplicate wi
   - *B2B receivables* — a different cadence (invoices and dunning ladders over weeks) and an
     invoice data model. New `FailureEvent` source and longer-horizon policy rows; same
     stopping rules and metrics.
-  - *Real outbound messaging* — the compliance surface (TRAI DLT registration, DND, consent
-    records) is a project in itself. Swap the simulated-notification executor for a real
-    provider behind the same `ExecutionRecord` interface.
+  - *Real outbound messaging* — the timing and consent half of the compliance surface is
+    now enforced (I5 quiet hours, I6 suppression, I7 daily ceilings), and every contact
+    in the batch above passed through it. What remains is the registration half — TRAI
+    DLT template and header registration, DND scrubbing against the national registry,
+    and consent artefacts — which is a project in itself. Swap the
+    simulated-notification executor for a real provider behind the same
+    `ExecutionRecord` interface.
   - *Learned retry timing* — a wrong learned policy moves money wrongly. The deterministic
     policy table is the baseline any learned policy would have to beat.
 - Every simulated message carries the literal `[SYNTHETIC DEMO]` disclosure, and the
   copy validator rejects any draft without it. Nothing is ever transmitted anywhere.
+
+## Deploying it
+
+```bash
+docker build -t sahara .
+docker run -p 8000:8000 sahara
+```
+
+The image bakes the batch in **at build time** rather than replaying it at boot: a
+container that simulates 88 cases on startup is one whose first request waits on a
+simulation, and whose numbers drift from the README if anything in the environment does.
+Running it during the build means the image either contains a batch whose acceptance
+checks all passed, or **the build fails** — `run_batch.py` exits non-zero, and that
+stops the build.
+
+It boots as a **public demo**, which means two things:
+
+1. **Every write route returns 404** — not 403. A 403 announces there is an endpoint
+   here and you may not use it, which is an invitation to hunt for the misconfigured
+   one. A 404 says there is nothing here, which in demo mode is true.
+2. **Boot refuses if any provider credential is present.** `assert_demo_safe()` runs
+   before the database is even opened and exits the process. A demo that can be handed
+   a Razorpay key and start moving money by env var is not fail-closed; it is
+   fail-closed-until-somebody-changes-their-mind.
+
+That second rule is a code path rather than a Dockerfile line on purpose: a container is
+a deployment detail, and the bounds of the agent are source code.
+
+### The Next.js console
+
+```bash
+uvicorn app.main:app --reload      # the API on :8000
+cd web && npm run dev              # the console on :3000
+```
+
+App Router, TypeScript, Tailwind. Every **read** path is a server component — the pages
+that draw the batch send no JavaScript to do it. The client components are the ones that
+genuinely need a browser: the navigation (it reads the current route, and owns the mobile
+drawer), the control room (it polls a running job), and the three live-demo surfaces. The
+API client is generated from the FastAPI OpenAPI schema, so a renamed route breaks the
+build instead of a page.
+
+Three screens exist here that the vanilla dashboard never had: `/queue` (the ₹40 handoff
+queue), `/cases/[id]` (the voice-and-promise timeline) and `/fencing` (the compensation
+log).
+
+**The live demo** — one real Razorpay failure, watched against the running server rather
+than replayed — is three routes:
+
+| Route | Who it is for |
+|---|---|
+| `/demo` | **Test mode.** Start here. Links the two below, and injects any of the six causes directly for the rules test-mode checkout cannot reach |
+| `/subscribe` | The customer. A plain subscribe-and-pay page — no stage names, no rule IDs, no rupee-at-risk |
+| `/pipeline?demo_id=…` | The operator. The same case in stages and rule IDs, updating within a second of each webhook |
+
+`/subscribe` and `/pipeline` deliberately render without the console rail: one is a
+different product with a different name on it, the other is a companion window.
+
+The vanilla dashboard at `/` still ships and still works — it is deleted only once every
+one of its sections has an equivalent, and Test mode was the last gap.
+See [`web/README.md`](web/README.md).
 
 ## Documentation
 
@@ -400,11 +671,15 @@ This README is the operator's guide — setup, the three LLM modes, live mode, a
 verify every number are all above. Beyond it, the project documents itself in the places
 that cannot drift away from the code:
 
-- **`tests/`** — 98 tests are the executable specification. `test_policy_matrix.py`
+- **`tests/`** — 241 tests are the executable specification. `test_policy_matrix.py`
   iterates all 6×3 cells of the decision table; `test_invariants.py` drives a case to the
   attempt cap and asserts I1 fires; `test_copy_validation.py` is the copy validator's
-  contract, rule by rule; `test_llm_boundary.py` pins the model's blast radius.
-- **`schema.sql`** — seven tables, with `CHECK` constraints as the enum backstop.
+  contract, rule by rule; `test_llm_boundary.py` pins the model's blast radius;
+  `test_contact_hygiene.py` sends a message at 21:30 IST and asserts it waits;
+  `test_audit_chain.py` edits and deletes audit rows behind the writer's back and
+  asserts `verify()` names them; `test_economics.py` asserts the agent's priors are
+  *not* the simulator's outcome model.
+- **`schema.sql`** — eight tables, with `CHECK` constraints as the enum backstop.
 - **`app/config.py`** — the bounds, the rule table, the policy table and the copy
   templates, in one readable file.
 - **`tests/fixtures/README.md`** — what each captured payload is, and the category it

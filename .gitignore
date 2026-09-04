@@ -6,9 +6,15 @@ recovery.db
 recovery.db-journal
 *.db
 synthetic_cases.json
+uploads/
 .pytest_cache/
 .DS_Store
 .claude/
 *.db-shm
 *.db-wal
 graphify-out/
+docs/video-script.md
+# the Next.js console keeps its own ignore file
+web/node_modules/
+web/.next/
+BUILD-PLAN.md

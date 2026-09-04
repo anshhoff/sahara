@@ -289,13 +289,21 @@ def generate(n: int, seed: int) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Generate synthetic failed-subscription cases")
-    ap.add_argument("--n", type=int, default=80, help="sampled cases, 60-100 (edge cases are added on top)")
+    ap.add_argument("--n", type=int, default=80,
+                    help="sampled cases, at least 60 (edge cases are added on top). The upper "
+                         "bound was 100 when this only fed a demo batch; the measurement runs "
+                         "need thousands of cases for the confidence intervals to mean anything, "
+                         "and nothing in the generator is bounded by scale.")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--out", default="synthetic_cases.json")
     args = ap.parse_args()
 
-    if not 60 <= args.n <= 100:
-        ap.error("--n must be between 60 and 100 (docs/05 §1)")
+    # The floor stays: below ~60 the exact-count category split stops matching the
+    # weights table. The ceiling of 100 was a demo-scale assumption, and it is gone —
+    # every confidence interval this project publishes gets narrower with n, and
+    # nothing in the generator is bounded by scale.
+    if args.n < 60:
+        ap.error("--n must be at least 60 (docs/05 §1)")
 
     data = generate(args.n, args.seed)
     Path(args.out).write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")

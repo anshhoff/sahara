@@ -144,6 +144,12 @@ def customer_opted_out(customer_id: str) -> bool:
 def intake(payload: dict[str, Any], source: str = "webhook",
            headers: Optional[dict[str, str]] = None) -> dict[str, Any]:
     """The one ingestion path. Idempotent on the event id."""
+    with clock.timed("detect"):
+        return _intake(payload, source, headers)
+
+
+def _intake(payload: dict[str, Any], source: str,
+            headers: Optional[dict[str, str]]) -> dict[str, Any]:
     event_id = extract_event_id(payload, headers)
     if not event_id:
         return {"status": "rejected", "reason": "no event id in payload or headers"}
@@ -228,8 +234,10 @@ def intake(payload: dict[str, Any], source: str = "webhook",
 
     # subscription.halted is not terminal on its own: it means Razorpay's own retries
     # are exhausted, which is precisely when this agent matters. Same path as any failure.
-    diagnosis.diagnose(case, event)
-    policy.decide(cases.get(case["id"]))
+    with clock.timed("diagnose", case["id"]):
+        diagnosis.diagnose(case, event)
+    with clock.timed("decide", case["id"]):
+        policy.decide(cases.get(case["id"]))
 
     return {
         "status": "processed",

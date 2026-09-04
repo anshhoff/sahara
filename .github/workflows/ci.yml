@@ -1,0 +1,113 @@
+name: CI
+
+# Three jobs, and the third is the one that matters.
+#
+# `tests` proves the code does what the tests say. `batch` proves the pipeline still
+# passes its own acceptance checks end to end. `verify` proves the README still tells
+# the truth — it re-runs the batch from the seed and byte-compares the headline numbers
+# against the committed JSON, so editing a digit in the results table turns CI red.
+#
+# A repository whose numbers can drift from its own claims without anything noticing is
+# a repository whose numbers are decoration.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # No test and no batch may reach a model. The suite pins this itself with
+  # os.environ.setdefault, which loses to a real value in the environment — so it is
+  # pinned here too, where the environment is ours.
+  LLM_PROVIDER: none
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  tests:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q
+
+  batch:
+    name: batch acceptance checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      # run_batch.py exits non-zero if any acceptance check fails, so this step IS the
+      # assertion — there is nothing to grep for.
+      - name: Replay the batch
+        run: |
+          python scripts/generate_synthetic.py --n 80 --seed 42 --out synthetic_cases.json
+          python scripts/run_batch.py --cases synthetic_cases.json --db ci.db \
+              --seed 42 --holdout 0.35
+
+  verify:
+    name: the README still tells the truth
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Re-derive every headline number from the seed
+        run: python scripts/verify_numbers.py --check
+
+  web:
+    name: the console builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      # A renamed API route breaks this build rather than a page at runtime, which is
+      # the entire reason the client is generated from the OpenAPI schema.
+      - run: npm run build
+        working-directory: web
+
+  docker:
+    name: the image builds and boots fail-closed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: docker build -t sahara:ci .
+      - name: A public demo serves reads and refuses every write
+        run: |
+          docker run -d --name demo -p 8000:8000 sahara:ci
+          for i in $(seq 1 30); do
+            curl -sf localhost:8000/healthz >/dev/null && break || sleep 1
+          done
+          test "$(curl -s -o /dev/null -w '%{http_code}' localhost:8000/api/summary)" = "200"
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST localhost:8000/api/suppression/x)" = "404"
+          docker rm -f demo
+      - name: Boot REFUSES when a provider credential is present
+        run: |
+          if docker run --rm -e RAZORPAY_KEY_ID=rzp_test_ci sahara:ci \
+               python -c "from app import config; config.assert_demo_safe()"; then
+            echo "the demo booted while holding a live credential — this must never pass"
+            exit 1
+          fi

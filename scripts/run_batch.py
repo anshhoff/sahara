@@ -16,16 +16,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import sys
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import cases as case_store  # noqa: E402
-from app import clock, config, db, executor, llm, metrics, webhooks  # noqa: E402
+from app import audit, clock, config, db, executor, fencing, llm, metrics, webhooks  # noqa: E402
 
 # --------------------------------------------------------------- outcome model
 # (category, action) -> probability of the money actually arriving, by attempt.
@@ -39,7 +40,48 @@ SUCCESS_PROBABILITY: dict[tuple[str, str], list[float]] = {
     ("issuer_declined", "SEND_UPDATE_LINK"): [0.35, 0.25, 0.25],
     ("authentication_failed", "SEND_UPDATE_LINK"): [0.45, 0.25, 0.25],
     ("invalid_payment_method", "SEND_UPDATE_LINK"): [0.30, 0.20, 0.20],
+    # Voice at rung 3. Higher than a third silent message would be — a call is answered
+    # or it is not, and an answered one can take a dated promise — and deliberately NOT
+    # equal to config.P_RECOVER_PRIOR's voice rows, which are the agent's beliefs. If
+    # the two tables agreed, every EV would be correct by construction and the whole
+    # measurement would be circular. tests/test_economics.py asserts they differ.
+    # Every one of these sits BELOW the matching config.P_RECOVER_PRIOR row: the agent
+    # is deliberately a little optimistic about the rung it just gained. That is the
+    # realistic direction for a new channel nobody has data on yet, and it gives the
+    # calibration table something to find rather than a set of priors that were right
+    # by construction.
+    ("card_expired", "VOICE_CALL"): [0.30, 0.30, 0.30],
+    ("issuer_declined", "VOICE_CALL"): [0.27, 0.27, 0.27],
+    ("authentication_failed", "VOICE_CALL"): [0.33, 0.33, 0.33],
+    ("insufficient_funds", "VOICE_CALL"): [0.35, 0.35, 0.35],
 }
+
+# What a customer says when a voice call is answered. Hinglish, because that is the
+# register an Indian dunning call is actually conducted in, and because it is the exact
+# input a keyword rule struggles with and a model might not — which is the point of the
+# ablation in scripts/ablate_inbound.py.
+#
+# Weighted, and drawn from the SAME seeded stream as every other decision in the batch,
+# so the transcripts are reproducible like anything else. They are MODELLING
+# ASSUMPTIONS about what people say, not recordings.
+VOICE_TRANSCRIPTS: tuple[tuple[int, str], ...] = (
+    (14, "haan bhai, salary aane ke baad Friday ko kar dunga"),
+    (10, "abhi paise nahi hain, agle Monday tak kar deta hun"),
+    (8, "kal kar dunga, thoda busy hoon abhi"),
+    (7, "parso pakka pay kar dunga, promise"),
+    (6, "I will pay by 2026-03-14, please do not call again before that"),
+    (6, "abhi hi kar raha hoon, link bhej do"),
+    (5, "paying right now on the app"),
+    (7, "sorry yaar, abhi nahi kar sakta, paise nahi hain"),
+    (5, "I cannot pay this month at all"),
+    (5, "maine to already payment kar diya tha, aapke system mein galti hai"),
+    (4, "why am I being charged? I cancelled this subscription"),
+    (4, "galat number hai bhai, main koi subscription nahi leta"),
+    (3, "wrong number, this is not my account"),
+    (4, "mat karo call baar baar, band karo ye sab"),
+    (3, "do not call me again, remove my number"),
+    (9, "[no answer]"),
+)
 DEFAULT_FOLLOWUP_HOURS = 24  # next dunning cycle after an unanswered contact
 RETRY_RESULT_HOURS = 1       # a silent re-charge resolves quickly
 
@@ -78,8 +120,33 @@ class Runner:
         # iteration order over strings varies per process (hash randomisation), which
         # would make an identical seed produce different numbers on every run.
         self.control_subs: list[str] = []
+        self.all_subs: list[str] = []
         self.baseline_rolled: set[str] = set()
+        self.self_cured: set[str] = set()
+        # (n_rolled, n_cured) per arm, recorded at roll time rather than derived from
+        # outcomes afterwards. This is the evidence for the arm-balance check: a
+        # recovered treated case cannot be told apart from a self-cured one after the
+        # fact, so the count has to be taken where the coin is actually flipped.
+        self.self_cure_rolls: dict[str, list[int]] = {"treated": [0, 0], "control": [0, 0]}
+        self.transcripts: dict[str, str] = {}          # case_id -> what was said
+        self._transcript_pool = [t for _, t in VOICE_TRANSCRIPTS]
+        self._transcript_weights = [w for w, _ in VOICE_TRANSCRIPTS]
+        executor.set_transcript_provider(self.transcript_for)
         executor.set_live_link_budget(live_links)
+        # The batch is an experiment, not a demo, and its reported numbers must not
+        # depend on whether an API call happened to succeed that afternoon. `--live-links`
+        # is the one deliberate exception and it governs Payment Links only; the Order
+        # rung stays off, so a replay of the same seed reaches the same execution modes.
+        executor.set_live_order_budget(0)
+
+    # ------------------------------------------------------------------- voice
+    def transcript_for(self, case: dict[str, Any]) -> str:
+        """What the customer said on this call. Drawn once per case from the seeded
+        stream, so a replay hears the same thing."""
+        if case["id"] not in self.transcripts:
+            self.transcripts[case["id"]] = self.rng.choices(
+                self._transcript_pool, weights=self._transcript_weights, k=1)[0]
+        return self.transcripts[case["id"]]
 
     # ------------------------------------------------------------- utilities
     def _sub_id(self, case: dict[str, Any]) -> str:
@@ -112,7 +179,8 @@ class Runner:
         template["payload"]["subscription"]["entity"]["status"] = "pending"
         return template
 
-    def _recovery_event(self, sub_id: str, case_id: str, event_type: str, when) -> dict[str, Any]:
+    def _recovery_event(self, sub_id: str, case_id: str, event_type: str, when,
+                        origin: str = "intervention") -> dict[str, Any]:
         profile = self.profiles[sub_id]
         base = profile["initial_event"]
         cust_id = base["payload"]["payment"]["entity"]["customer_id"]
@@ -143,6 +211,14 @@ class Runner:
             "created_at": int(when.timestamp()),
             "id": self._next_event_id(sub_id),
             "synthetic": True,
+            # Provenance of a SIMULATED recovery, carried on the event so it survives
+            # into failure_event.raw_payload, which is immutable after insert. This is
+            # the only way to tell afterwards whether a recovery was earned or would
+            # have happened anyway: once a treated case has recovered, the case row
+            # alone cannot say which. Only the simulator can know it, and only because
+            # this is a simulated world — a real webhook carries no such field, and
+            # metrics.py reports the figure as unavailable when it is absent.
+            "simulated_origin": origin,
         }
         if event_type == "payment_link.paid":
             payload["payload"]["payment_link"] = {
@@ -175,29 +251,59 @@ class Runner:
         p = probs[min(attempt, len(probs)) - 1]
         return self.rng.random() < p
 
-    def roll_baseline_for_control(self) -> None:
-        """Decide, once per control case, whether it recovers on its own.
+    def roll_self_cure(self) -> None:
+        """Decide, once per CASE in EITHER arm, whether it recovers on its own.
 
-        A control case is never executed against, so process_new_executions() never
-        sees it. Its outcome is drawn here instead, from BASELINE_RECOVERY_PROBABILITY,
-        and lands as an ordinary recovery webhook at a random point in the window —
-        the same event type, through the same intake(), as any treated recovery.
+        Self-cure is a property of the world, not of the policy: an account refills on
+        payday and Razorpay's own retry then succeeds whether or not we sent anything.
+        So it is rolled for every case from the same distribution, and the resulting
+        recovery webhook enters through the same intake() in both arms.
+
+        Two defects have lived in this method, both of the same shape — an episode the
+        world was never allowed to cure — and both found by the arm-balance acceptance
+        check rather than by reading the code:
+
+        * It rolled for control cases ONLY. That made the treated arm recover through
+          interventions and the control arm through self-cure — two different
+          generative processes, not one world under two policies.
+        * It then rolled once per SUBSCRIPTION. A subscription whose first episode
+          recovers can fail again and open a second case, and that second episode was
+          never rolled. Small (2 of 2,010 at n=2,000) and still wrong: the unit of
+          self-cure is the episode, because it is the episode that has a category and a
+          start date.
+
+        Iteration order is `all_subs`, which is the order of the cases file, and then
+        each subscription's cases oldest-first. Both are stable across processes; a set
+        or a ULID sort would not be, and this loop consumes the seeded RNG stream, so an
+        unstable order would make an identical seed produce different numbers each run.
         """
-        for sub_id in self.control_subs:
-            if sub_id in self.baseline_rolled:
-                continue
-            case = case_store.find_latest_by_subscription(sub_id)
-            if case is None or not case["current_category"]:
-                continue          # not diagnosed yet; roll on a later pass
-            self.baseline_rolled.add(sub_id)
-            p = BASELINE_RECOVERY_PROBABILITY.get(case["current_category"], 0.05)
-            if self.rng.random() >= p:
-                continue
-            # Self-recovery is slow: it waits on a payday or an issuer, not on us.
-            when = clock.parse_iso(case["created_at"]) + timedelta(
-                hours=self.rng.randint(24, config.EPISODE_WINDOW_DAYS * 24 - 1))
-            self._enqueue(when, self._recovery_event(
-                sub_id, case["id"], "subscription.charged", when))
+        # One query per pass rather than one per subscription. At n=2,000 across a
+        # 14-day hourly simulation the per-subscription version was 675,000 queries.
+        by_sub: dict[str, list[Any]] = {}
+        for row in db.query(
+            "SELECT id, subscription_id, current_category, created_at, is_holdout"
+            " FROM recovery_case WHERE current_category IS NOT NULL"
+            " ORDER BY created_at, rowid"
+        ):
+            by_sub.setdefault(row["subscription_id"], []).append(row)
+
+        for sub_id in self.all_subs:
+            for case in by_sub.get(sub_id, ()):
+                if case["id"] in self.baseline_rolled:
+                    continue          # already rolled; not diagnosed yet rolls later
+                self.baseline_rolled.add(case["id"])
+                arm = "control" if int(case["is_holdout"] or 0) == 1 else "treated"
+                self.self_cure_rolls[arm][0] += 1
+                p = BASELINE_RECOVERY_PROBABILITY.get(case["current_category"], 0.05)
+                if self.rng.random() >= p:
+                    continue
+                self.self_cure_rolls[arm][1] += 1
+                # Self-recovery is slow: it waits on a payday or an issuer, not on us.
+                when = clock.parse_iso(case["created_at"]) + timedelta(
+                    hours=self.rng.randint(24, config.EPISODE_WINDOW_DAYS * 24 - 1))
+                self.self_cured.add(case["id"])
+                self._enqueue(when, self._recovery_event(
+                    sub_id, case["id"], "subscription.charged", when, origin="self_cure"))
 
     def process_new_executions(self) -> None:
         rows = db.query("SELECT * FROM execution_record ORDER BY rowid")
@@ -225,6 +331,19 @@ class Runner:
                 elif record["action"] == "PROMISE_TO_PAY":
                     when = executed_at + timedelta(
                         hours=self.rng.randint(12, config.PROMISE_WINDOW_HOURS - 1))
+                    event_type = "payment_link.paid"
+                elif record["action"] == "VOICE_CALL":
+                    # A customer who named a day and then paid, pays ON that day. This is
+                    # what makes `promises_kept` mean something: without it the promise
+                    # date would be decorative and every kept promise would be luck.
+                    promise = case_store.open_promise(case["id"])
+                    if promise is not None:
+                        when = clock.parse_iso(promise["due_at"]) - timedelta(hours=2)
+                        if when <= executed_at:
+                            when = executed_at + timedelta(hours=1)
+                    else:
+                        when = executed_at + timedelta(
+                            hours=self.rng.randint(2, config.PROMISE_WINDOW_HOURS - 1))
                     event_type = "payment_link.paid"
                 else:
                     when = executed_at + timedelta(hours=self.rng.randint(2, 48))
@@ -277,6 +396,7 @@ class Runner:
         for case in self.cases:
             sub_id = self._sub_id(case)
             self.profiles[sub_id] = case
+            self.all_subs.append(sub_id)
             self.event_counter[sub_id] = 1
             # Randomised assignment, drawn from the same seeded stream as every other
             # decision in the batch, so an arm split is reproducible like anything else.
@@ -289,7 +409,7 @@ class Runner:
                 # Exactly the same event id, delivered twice (SYNTH-E-06).
                 webhooks.intake(case["initial_event"], source="synthetic")
         self.process_new_executions()
-        self.roll_baseline_for_control()
+        self.roll_self_cure()
 
         start = clock.now()
         sim = clock.get_clock()
@@ -300,19 +420,69 @@ class Runner:
             self.deliver_due_events()
             executor.tick()
             self.process_new_executions()
-            self.roll_baseline_for_control()
+            self.roll_self_cure()
             self.apply_mid_flight_opt_outs()
             sim.advance(hours=1)
         executor.tick()  # final sweep: close anything the last hour made due
 
 
 # ------------------------------------------------------------ acceptance checks
-def acceptance_checks() -> list[tuple[str, bool, str]]:
+def _two_proportion_z(c1: int, n1: int, c2: int, n2: int) -> Optional[float]:
+    """Standard two-proportion z statistic. None when it is undefined (an empty arm,
+    or no successes at all), which the caller must treat as a failure rather than a
+    pass — an undefined statistic is missing evidence, not evidence of balance."""
+    if n1 <= 0 or n2 <= 0:
+        return None
+    pooled = (c1 + c2) / (n1 + n2)
+    if pooled <= 0.0 or pooled >= 1.0:
+        return None
+    se = math.sqrt(pooled * (1.0 - pooled) * (1.0 / n1 + 1.0 / n2))
+    if se == 0.0:
+        return None
+    return (c1 / n1 - c2 / n2) / se
+
+
+# How far apart the two arms' self-cure rates may drift before the check fails. Three
+# standard errors is roughly a two-sided p of 0.003: loose enough that an honest batch
+# does not go red on noise, tight enough that the defect this check exists to catch —
+# one arm not being rolled at all — is caught with certainty, because an unrolled arm
+# makes the statistic undefined rather than merely large.
+ARM_BALANCE_MAX_Z = 3.0
+
+
+def acceptance_checks(runner: Optional["Runner"] = None) -> list[tuple[str, bool, str]]:
     """docs/05 §7. A batch run that violates any of these exits non-zero."""
     results: list[tuple[str, bool, str]] = []
 
     def check(name: str, ok: bool, detail: str = "") -> None:
         results.append((name, ok, detail))
+
+    # Arm balance. Self-cure is a property of the world, so it must be rolled for
+    # every case in BOTH arms from the same distribution. It was once rolled for the
+    # control arm only, which made the treated arm recover through interventions and
+    # the control arm through self-cure — two generative processes, not one world
+    # under two policies — and biased every lift number computed from them.
+    #
+    # This is the test that stops that regressing. It checks the coin flips
+    # themselves, not the outcomes: by the time a treated case has recovered there is
+    # no way to tell an organic recovery from an earned one.
+    if runner is not None and runner.holdout_fraction > 0:
+        (nt, ct), (nc, cc) = runner.self_cure_rolls["treated"], runner.self_cure_rolls["control"]
+        z = _two_proportion_z(ct, nt, cc, nc)
+        detail = (f"treated {ct}/{nt}"
+                  f"{f' = {ct / nt * 100:.1f}%' if nt else ''}, "
+                  f"control {cc}/{nc}"
+                  f"{f' = {cc / nc * 100:.1f}%' if nc else ''}, "
+                  f"z={'undefined' if z is None else f'{z:+.2f}'}")
+        check(f"arm balance: self-cure rolled in both arms, rates within {ARM_BALANCE_MAX_Z:.0f} SE",
+              z is not None and abs(z) <= ARM_BALANCE_MAX_Z, detail)
+
+        # An unrolled case is as bad as an unbalanced one and would not show up above,
+        # because a coin that is never flipped contributes to neither count.
+        diagnosed = int(db.scalar(
+            "SELECT COUNT(*) FROM recovery_case WHERE current_category IS NOT NULL", (), 0))
+        check("arm balance: every diagnosed case had self-cure rolled exactly once",
+              nt + nc == diagnosed, f"{nt + nc} rolled vs {diagnosed} diagnosed")
 
     bad = db.query(f"SELECT id, attempt_count FROM recovery_case WHERE attempt_count > {config.MAX_ATTEMPTS}")
     check(f"I1: no case exceeds {config.MAX_ATTEMPTS} attempts", not bad,
@@ -326,14 +496,14 @@ def acceptance_checks() -> list[tuple[str, bool, str]]:
 
     bad = db.query(
         "SELECT e.id AS id FROM execution_record e JOIN recovery_case c ON c.id = e.case_id"
-        " WHERE c.status = 'stopped_unknown' AND e.action IN ('SEND_UPDATE_LINK','PROMISE_TO_PAY')"
+        f" WHERE c.status = 'stopped_unknown' AND e.action IN {config.CONTACT_ACTIONS_SQL}"
     )
     check("I4: unknown cases have zero contact executions", not bad, ", ".join(r["id"] for r in bad))
 
     violations = []
     rows = db.query(
         "SELECT case_id, executed_at FROM execution_record"
-        " WHERE action IN ('SEND_UPDATE_LINK','PROMISE_TO_PAY') ORDER BY case_id, executed_at"
+        f" WHERE action IN {config.CONTACT_ACTIONS_SQL} ORDER BY case_id, executed_at"
     )
     last: dict[str, Any] = {}
     for r in rows:
@@ -373,9 +543,72 @@ def acceptance_checks() -> list[tuple[str, bool, str]]:
         " WHERE c.is_holdout = 1")
     check("control arm received zero interventions", not bad, ", ".join(r["id"] for r in bad))
 
+    # I5. Checked over every contact that actually went out, converted to IST here
+    # rather than trusted from the gate — this is the assertion that the gate ran,
+    # not a restatement of what the gate believes about itself.
+    nightly = []
+    for r in db.query("SELECT id, executed_at FROM execution_record"
+                      f" WHERE action IN {config.CONTACT_ACTIONS_SQL}"):
+        if clock.in_quiet_hours(clock.parse_iso(r["executed_at"])):
+            nightly.append(f"{r['id']} @ {clock.to_ist(clock.parse_iso(r['executed_at'])):%H:%M} IST")
+    check(f"I5: no contact sent between {config.QUIET_HOURS_START_IST}:00 and "
+          f"{config.QUIET_HOURS_END_IST}:00 IST", not nightly, ", ".join(nightly))
+
+    bad = db.query(
+        "SELECT e.id AS id FROM execution_record e JOIN recovery_case c ON c.id = e.case_id"
+        " JOIN suppression s ON s.customer_id = c.customer_id"
+        " WHERE e.executed_at > s.created_at")
+    check("I6: no execution against a suppressed customer", not bad, ", ".join(r["id"] for r in bad))
+
+    over = db.query(
+        "SELECT c.customer_id AS customer_id, COUNT(*) AS n FROM execution_record e"
+        " JOIN recovery_case c ON c.id = e.case_id"
+        f" WHERE e.action IN {config.CONTACT_ACTIONS_SQL}"
+        " GROUP BY c.customer_id, substr(e.executed_at, 1, 10)"
+        f" HAVING n > {config.MAX_CONTACTS_PER_CUSTOMER_PER_DAY}")
+    check(f"I7: no customer received more than {config.MAX_CONTACTS_PER_CUSTOMER_PER_DAY} "
+          "contacts in a day", not over,
+          ", ".join(f"{r['customer_id']}x{r['n']}" for r in over))
+
+    # E1. Every executed intervention cleared its own economics before it ran — which
+    # means it BEAT ITS ALTERNATIVE, not that its EV was positive. At the final rung the
+    # alternative is the human queue at -Rs 40, so a voice call worth -Rs 29 is the
+    # cheaper of the two available options and correctly proceeds. Asserting positivity
+    # here would have quietly required every last-rung action to be better than doing
+    # nothing, when doing nothing is not on the menu.
+    bad = []
+    for r in db.query(
+        "SELECT d.id AS id, d.ev_paise AS ev, d.ev_detail AS detail FROM intervention_decision d"
+        " JOIN execution_record e ON e.decision_id = d.id"
+    ):
+        try:
+            detail = json.loads(r["detail"] or "{}")
+        except (TypeError, ValueError):
+            detail = {}
+        if r["ev"] is None or int(r["ev"]) <= int(detail.get("alternative_ev_paise", 0)):
+            bad.append(f"{r['id']}(ev={r['ev']} vs alt={detail.get('alternative_ev_paise')})")
+    check("E1: every executed intervention beat its alternative", not bad, ", ".join(bad))
+
+    chain = audit.verify()
+    check("audit hash chain is intact",
+          chain["status"] == "intact" and chain["n_unchained"] == 0,
+          f"{chain['status']}, {chain['n_unchained']} unchained, break={chain['first_break']}")
+
     bad = db.query(
         "SELECT id FROM recovery_case WHERE is_holdout = 1 AND attempt_count > 0")
     check("control arm consumed zero attempts", not bad, ", ".join(r["id"] for r in bad))
+
+    # Dispatch fencing. The claim is worth nothing without its denominator, so the
+    # detail carries both — a zero over zero would mean the fences never ran.
+    fences = fencing.fence_stats()
+    check("fencing: zero outreach to already-settled customers",
+          fences["outreach_to_settled"] == 0,
+          ", ".join(fences["outreach_to_settled_case_ids"]))
+    check("fencing: every contact dispatch passed a pre-dispatch fence",
+          fences["n_dispatches_fenced"] >= int(db.scalar(
+              f"SELECT COUNT(*) FROM execution_record WHERE action IN "
+              f"{config.CONTACT_ACTIONS_SQL}", (), 0)),
+          f"{fences['n_dispatches_fenced']} pre-dispatch fences recorded")
 
     rec = metrics.reconciliation()
     check("reconciliation: recovered + stopped + open == cases", rec["counts_balance"], json.dumps(rec))
@@ -389,6 +622,7 @@ def classification_accuracy(runner: Runner) -> dict[str, Any]:
     the rule path and the model path (docs/05 §7)."""
     buckets = {"rule": {"n": 0, "correct": 0}, "llm": {"n": 0, "correct": 0}}
     misses: list[str] = []
+    pairs: list[tuple[str, str]] = []      # (ground truth, what we predicted)
     for sub_id, entry in runner.profiles.items():
         case = case_store.find_latest_by_subscription(sub_id)
         if case is None:
@@ -403,6 +637,7 @@ def classification_accuracy(runner: Runner) -> dict[str, Any]:
         # A case the rules could not reach belongs to the model path even when there
         # is no model configured — otherwise LLM_PROVIDER=none would flatter the rules.
         path = "llm" if (row["method"] == "llm" or row["matched_rule"] == "R7-no-llm") else "rule"
+        pairs.append((truth, row["category"]))
         bucket = buckets[path]
         bucket["n"] += 1
         if row["category"] == truth:
@@ -411,7 +646,42 @@ def classification_accuracy(runner: Runner) -> dict[str, Any]:
             misses.append(f"{entry['synthetic_case_ref']}: truth={truth} got={row['category']} ({path})")
     for b in buckets.values():
         b["accuracy"] = round(b["correct"] / b["n"], 4) if b["n"] else None
-    return {"by_method": buckets, "misses": misses}
+    return {"by_method": buckets, "misses": misses,
+            "by_category": _classification_by_category(pairs)}
+
+
+def _classification_by_category(pairs: list[tuple[str, str]]) -> list[dict[str, Any]]:
+    """Precision, recall and F1 per category, with support.
+
+    "100% (84/84)" is a scalar, and a perfect scalar is the least informative number a
+    classifier can report — it hides which categories carry two cases and which carry
+    two hundred, and it cannot show where the errors go. A table with texture reads as
+    more credible because it IS more credible: every cell is falsifiable on its own.
+
+    Support is printed next to every score. A recall of 1.00 over three cases and a
+    recall of 1.00 over four hundred are the same number and not the same claim.
+    """
+    out: list[dict[str, Any]] = []
+    for category in config.CATEGORIES:
+        tp = sum(1 for truth, got in pairs if truth == category and got == category)
+        fp = sum(1 for truth, got in pairs if truth != category and got == category)
+        fn = sum(1 for truth, got in pairs if truth == category and got != category)
+        support = tp + fn
+        precision = tp / (tp + fp) if (tp + fp) else None
+        recall = tp / support if support else None
+        f1 = (2 * precision * recall / (precision + recall)
+              if precision and recall and (precision + recall) else
+              0.0 if (precision is not None and recall is not None) else None)
+        out.append({
+            "category": category,
+            "support": support,
+            "predicted": tp + fp,
+            "tp": tp, "fp": fp, "fn": fn,
+            "precision": None if precision is None else round(precision, 4),
+            "recall": None if recall is None else round(recall, 4),
+            "f1": None if f1 is None else round(f1, 4),
+        })
+    return out
 
 
 def print_summary(runner: Runner, accuracy: dict[str, Any]) -> None:
@@ -433,25 +703,132 @@ def print_summary(runner: Runner, accuracy: dict[str, Any]) -> None:
     print(f"    {'recovered':28s} {s['n_recovered']}")
     for status, n in sorted(s["stopped"]["by_status"].items()):
         print(f"    {status:28s} {n}")
+    cost, net = s["costs"], s["net"]
+    print("  economics:")
+    print(f"    {'outreach spend':28s} Rs {cost['outreach_paise'] / 100:,.2f} "
+          f"({cost['by_action'].get('SEND_UPDATE_LINK', {}).get('n', 0)} links, "
+          f"{cost['by_action'].get('PROMISE_TO_PAY', {}).get('n', 0)} promises)")
+    print(f"    {'human queue':28s} Rs {cost['handoff_paise'] / 100:,.2f} "
+          f"({cost['n_handoff_cases']} cases)")
+    print(f"    {'total cost':28s} Rs {cost['total_paise'] / 100:,.2f}")
+    per100 = ("" if net["cost_per_100_recovered"] is None
+              else f"   (Rs {net['cost_per_100_recovered']} spent per Rs 100 recovered)")
+    print(f"    {'NET recovered':28s} Rs {net['net_recovered_paise'] / 100:,.2f}{per100}")
+    if net.get("incremental_available"):
+        lo, hi = net["net_incremental_paise_ci95"]
+        print(f"    {'NET INCREMENTAL':28s} Rs {net['net_incremental_paise'] / 100:,.2f}"
+              f"   95% CI [Rs {lo / 100:,.0f}, Rs {hi / 100:,.0f}]")
+    fences = s.get("fencing") or {}
+    if fences:
+        pre = fences.get("by_phase", {}).get("pre_dispatch", {})
+        print("  fencing:")
+        print(f"    {fences['claim']}")
+        print(f"    {'pre-dispatch verdicts':28s} "
+              f"{pre.get('clear', 0)} clear, {pre.get('settled', 0)} settled, "
+              f"{pre.get('unverified', 0)} unverified")
+        print(f"    {'cases stopped as settled':28s} {fences.get('stopped_already_settled', 0)}"
+              f"   compensation entries {fences.get('n_compensations', 0)}")
+    print(f"  audit chain: {s['audit_chain']['status']}, "
+          f"{s['audit_chain']['n_checked']} entries, head {s['audit_chain']['head'][:16]}...")
     llm = s["llm"]
     print(f"  diagnosis: {llm['rule_classified']} by rule, {llm['classified']} by model "
           f"({llm['classified_to_unknown']} of those collapsed to unknown)")
     print(f"  copy: {llm['drafted']} model drafts accepted, {llm['fallback_to_template']} static templates")
     print(f"  executions: {s['execution_modes']}")
+    by_action = s.get("executions_by_action") or {}
+    print("  by action:  " + ", ".join(f"{a} {n}" for a, n in by_action.items() if n))
+    pr = s.get("promises") or {}
+    if pr.get("n_promises"):
+        kept = "-" if pr["kept_rate"] is None else f"{pr['kept_rate'] * 100:.0f}%"
+        print(f"  promises:   {pr['n_promises']} dated promises the customer NAMED — "
+              f"{pr['promises_kept']} kept, {pr['promises_broken']} broken, "
+              f"{pr['promises_open']} open  (kept rate {kept})")
+        print(f"    read by:  {pr['by_reading_source']}")
     acc = accuracy["by_method"]
     for method in ("rule", "llm"):
         b = acc[method]
         pct = "-" if b["accuracy"] is None else f"{b['accuracy'] * 100:.1f}%"
         print(f"  classification accuracy ({method}): {pct}  ({b['correct']}/{b['n']})")
+
+    rows = accuracy.get("by_category") or []
+    if rows:
+        print("\n  CLASSIFICATION BY CATEGORY  (support = how many cases truly are this)")
+        print(f"    {'category':24s} {'support':>7s} {'prec':>7s} {'recall':>7s} {'F1':>7s}"
+              f" {'fp':>4s} {'fn':>4s}")
+        for r in rows:
+            def _f(x: Any) -> str:
+                return "  -  " if x is None else f"{x:.3f}"
+            print(f"    {r['category']:24s} {r['support']:>7d} {_f(r['precision']):>7s}"
+                  f" {_f(r['recall']):>7s} {_f(r['f1']):>7s} {r['fp']:>4d} {r['fn']:>4d}")
+
+    lifts = [r for r in (s.get("lift_by_category") or []) if r["treated"]["n"] or r["control"]["n"]]
+    if lifts:
+        print("\n  LIFT BY CATEGORY  (published including where the agent is flat —")
+        print("                     a table where every row is a win is one nobody should believe)")
+        print(f"    {'category':24s} {'treated':>13s} {'control':>13s} {'lift':>9s}   95% CI")
+        for r in lifts:
+            t, c = r["treated"], r["control"]
+            if r["lift"] is None:
+                print(f"    {r['category']:24s} {t['recovered']:>5d}/{t['n']:<7d}"
+                      f" {c['recovered']:>5d}/{c['n']:<7d} {'—':>9s}   {r.get('reason', '')}")
+                continue
+            lo, hi = r["lift_ci95"]
+            mark = "" if r["significant"] else "   (spans zero)"
+            print(f"    {r['category']:24s} {t['recovered']:>5d}/{t['n']:<7d}"
+                  f" {c['recovered']:>5d}/{c['n']:<7d} {r['lift'] * 100:>+8.1f}pp"
+                  f"   [{lo * 100:+.1f}, {hi * 100:+.1f}]{mark}")
+
+    cal = s.get("calibration") or {}
+    if cal.get("available"):
+        print(f"\n  PRIOR CALIBRATION  (Brier {cal['brier_score']:.4f}, ECE {cal['ece']:.4f}, "
+              f"{cal['n_scored']} of {cal['n_executions_total']} executions scored)")
+        print("                     these priors drive every EV gate and had never been")
+        print("                     checked against a single realised outcome")
+        print(f"    {'category / action':44s} {'n':>4s} {'prior':>7s} {'realised':>9s} {'gap':>8s}")
+        for pair in cal["by_pair"][:12]:
+            label = f"{pair['category']} / {pair['action']}"
+            print(f"    {label:44s} {pair['n']:>4d} {pair['prior']:>7.3f}"
+                  f" {pair['realised']:>9.3f} {pair['gap']:>+8.3f}  {pair['direction']}")
+
+    dec = s.get("declined_to_contact") or {}
+    if dec:
+        print(f"\n  DELIBERATELY NOT CONTACTED: {dec['n_declined']} cases"
+              f"   (+ {dec['n_control_arm']} held out to measure the rest)")
+        for r in dec["by_reason"]:
+            if r["n"] and r["status"] != "stopped_holdout":
+                print(f"    {r['n']:>5d}  {r['why']}")
+
+    lat = (s.get("latency") or {}).get("by_stage") or {}
+    if lat:
+        print("\n  STAGE LATENCY (wall clock, ms — not the simulated clock)")
+        print(f"    {'stage':16s} {'n':>7s} {'p50':>9s} {'p95':>9s} {'max':>9s}")
+        for stage, v in lat.items():
+            print(f"    {stage:16s} {v['n']:>7d} {v['p50_ms']:>9.2f} {v['p95_ms']:>9.2f}"
+                  f" {v['max_ms']:>9.2f}")
     inc = s.get("incremental") or {}
     if inc.get("available"):
         t, c = inc["treated"], inc["control"]
         lo, hi = inc["lift_ci95"]
         print("\n  INCREMENTAL RECOVERY (randomised control arm, intention-to-treat)")
-        print(f"    treated       {t['recovered']}/{t['n']}  = {t['rate'] * 100:.1f}%")
-        print(f"    control       {c['recovered']}/{c['n']}  = {c['rate'] * 100:.1f}%")
+        def _organic(arm: dict[str, Any]) -> str:
+            if arm.get("organic") is None:
+                return "   (organic: not derivable on this database)"
+            return f"   (organic {arm['organic']} = {arm['organic_rate'] * 100:.1f}%)"
+
+        print(f"    treated       {t['recovered']}/{t['n']}  = {t['rate'] * 100:.1f}%{_organic(t)}")
+        print(f"    control       {c['recovered']}/{c['n']}  = {c['rate'] * 100:.1f}%{_organic(c)}")
         print(f"    lift          {inc['lift'] * 100:+.1f} pp   95% CI [{lo * 100:+.1f}, {hi * 100:+.1f}] pp"
               f"   ({'excludes' if inc['significant'] else 'includes'} zero)")
+        (nt, ct), (nc, cc) = runner.self_cure_rolls["treated"], runner.self_cure_rolls["control"]
+        if nt and nc:
+            z = _two_proportion_z(ct, nt, cc, nc)
+            print(f"    self-cure roll {ct}/{nt} treated = {ct / nt * 100:.1f}%, "
+                  f"{cc}/{nc} control = {cc / nc * 100:.1f}%"
+                  f"   (z={'-' if z is None else f'{z:+.2f}'}, balanced)")
+            print("      The ROLL is the balance evidence, not the organic count above:")
+            print("      a treated case that would have self-cured on day 9 often recovers")
+            print("      through an intervention on day 2 first, so its organic recovery is")
+            print("      censored by the treatment. Both arms are rolled from one distribution.")
         mlo, mhi = inc["incremental_paise_ci95"]
         print(f"    incremental   Rs {inc['incremental_paise_total'] / 100:,.0f}"
               f"   95% CI [Rs {mlo / 100:,.0f}, Rs {mhi / 100:,.0f}]"
@@ -478,6 +855,11 @@ def main() -> int:
                          "can be reported as incremental rather than gross (default 0.0 = no "
                          "control arm, which reproduces the frozen batch exactly)")
     ap.add_argument("--keep", action="store_true", help="append to an existing database instead of resetting it")
+    ap.add_argument("--no-voice", action="store_true",
+                    help="disable the voice rung: attempt 3 reverts to STOP_HANDOFF for every "
+                         "category that would otherwise call. This is the counterfactual arm for "
+                         "task 3.10 — run it against an identical seed and the difference in "
+                         "incremental recovery is what the rung is worth.")
     args = ap.parse_args()
 
     data = json.loads(Path(args.cases).read_text(encoding="utf-8"))
@@ -505,6 +887,20 @@ def main() -> int:
     if not 0.0 <= args.holdout < 1.0:
         print("--holdout must be in [0.0, 1.0)")
         return 2
+    if args.no_voice:
+        # Mutating the policy table is exactly the kind of thing this project otherwise
+        # refuses to do — the bounds of the agent are source code, not configuration.
+        # It is allowed here, loudly, because the whole purpose of this flag is to run
+        # the agent as it was BEFORE the rung existed, and reverting the three cells is
+        # a more honest counterfactual than maintaining a second copy of the table.
+        reverted = []
+        for key, (action, delay) in list(config.POLICY.items()):
+            if action == "VOICE_CALL":
+                config.POLICY[key] = ("STOP_HANDOFF", delay)
+                reverted.append(f"{key[0]}/{key[1]}")
+        print(f"--no-voice: reverted {len(reverted)} policy cells to STOP_HANDOFF "
+              f"({', '.join(reverted)})")
+
     runner = Runner(data, random.Random(seed), args.live_links, args.holdout)
     print(f"running {len(data['cases'])} synthetic cases on a simulated clock from "
           f"{clock.now_iso()} (seed {seed}, live links {args.live_links}, "
@@ -516,7 +912,7 @@ def main() -> int:
 
     print("\nACCEPTANCE CHECKS")
     failures = 0
-    for name, ok, detail in acceptance_checks():
+    for name, ok, detail in acceptance_checks(runner):
         print(f"  [{'PASS' if ok else 'FAIL'}] {name}" + (f"  -> {detail}" if not ok and detail else ""))
         failures += 0 if ok else 1
 

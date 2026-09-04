@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from app import audit, cases, clock, config, db, llm
+from app import audit, cases, clock, config, db, fencing, llm
 
 
 def match_input(event: dict[str, Any]) -> str:
@@ -60,15 +60,34 @@ def diagnose(case: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
     denormalise the category onto the case for the policy lookup."""
     verdict = apply_rules(event)
     used_llm = verdict is None
+    stale_inference: Optional[dict[str, Any]] = None
     if used_llm:
-        verdict = llm.classify(
-            {
-                "error_code": event.get("error_code"),
-                "error_reason": event.get("error_reason"),
-                "error_description": event.get("error_description"),
-                "error_step": event.get("error_step"),
-            }
-        )
+        # Fence 3: the stale-inference guard. A model call is the one step here with
+        # unbounded latency — a slow provider, a retry, a rate limit — and the case can
+        # move underneath it. The fingerprint covers DECISION-RELEVANT fields only, so
+        # the customer's notes changing, or `updated_at` ticking, does not trip it. A
+        # guard that fires on irrelevant churn gets switched off within a week and
+        # protects nothing; the value of this one is that it is quiet.
+        snapshot = fencing.decision_fingerprint(cases.get(case["id"]) or case)
+        with clock.timed("llm_classify", case["id"]):
+            verdict = llm.classify(
+                {
+                    "error_code": event.get("error_code"),
+                    "error_reason": event.get("error_reason"),
+                    "error_description": event.get("error_description"),
+                    "error_step": event.get("error_step"),
+                }
+            )
+        fresh = fencing.inference_unchanged(cases.get(case["id"]) or case, snapshot, action="CLASSIFY")
+        if fresh.blocks:
+            # The classification was computed against a world that no longer exists.
+            # It is recorded — the model did produce it, and hiding that would make the
+            # trail claim less than it knows — but it is not acted on. `unknown` always
+            # stops (I4), which is the correct destination for an answer to a question
+            # that is no longer the question being asked.
+            stale_inference = {"snapshot": snapshot, "reason": fresh.reason,
+                               "superseded_category": verdict.get("category")}
+            verdict = dict(verdict, category="unknown", confidence=0.0)
 
     diagnosis_id = db.new_id("dia")
     db.insert(
@@ -100,7 +119,10 @@ def diagnose(case: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
         summary = (
             f"Diagnosed {verdict['category']} by model {verdict.get('llm_model')} "
             f"at confidence {verdict.get('confidence'):.2f}"
-            + ("" if verdict["category"] != "unknown" else " — below threshold or unparseable, forced to unknown")
+            + (" — decision-relevant state changed while the inference was in flight, so the "
+               "model's answer was recorded and not acted on" if stale_inference else
+               "" if verdict["category"] != "unknown" else
+               " — below threshold or unparseable, forced to unknown")
         )
 
     audit.audit(
@@ -120,6 +142,7 @@ def diagnose(case: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
             "rationale": verdict.get("rationale"),
             "classified_text": match_input(event) or None,
             "confidence_threshold": config.LLM_CONFIDENCE_THRESHOLD,
+            "stale_inference": stale_inference,
         },
     )
     return db.row_to_dict(db.query_one("SELECT * FROM diagnosis_result WHERE id = ?", (diagnosis_id,)))

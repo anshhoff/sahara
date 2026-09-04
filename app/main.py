@@ -14,26 +14,71 @@ import os
 from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app import api, clock, config, control, db, executor, llm, webhooks
+from app import api, clock, config, control, db, executor, live_demo, llm, webhooks
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("recovery-agent")
+
+def _env_list(name: str, default: str) -> list[str]:
+    return (os.environ.get(name) or default).split(",")
+
 
 TICK_INTERVAL_SECONDS = int(os.environ.get("TICK_INTERVAL_SECONDS", "30"))
 DASHBOARD_DIR = Path(config.ROOT) / "dashboard"
 
 app = FastAPI(
-    title="Failed Subscription Recovery Agent",
-    description="Razorpay AI Buildathon — Track 03: AI Revenue Recovery",
+    title="Sahara",
+    description="Failed Subscription Recovery Agent — Razorpay AI Buildathon, Track 03: AI Revenue Recovery",
     version="1.0",
 )
+# The Next.js console (web/) runs on its own origin in development. Its READ paths are
+# server components and fetch this API from Node, which no browser policy applies to;
+# the control room is the one client component and its fetches come from the browser,
+# so without this it is the only page that breaks — which is exactly what happened.
+#
+# Development origins only, and never `*`: this API is unauthenticated by design on a
+# single-operator local app, and a wildcard would let any page the operator happens to
+# have open drive the control room. `WEB_ORIGINS` widens it for a real deployment.
+_WEB_ORIGINS = [
+    o.strip() for o in _env_list("WEB_ORIGINS",
+                                 "http://localhost:3000,http://127.0.0.1:3000") if o.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_WEB_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["content-type", "accept"],
+)
+
 app.include_router(api.router)
+app.include_router(live_demo.router)
 if config.CONTROL_ENABLED:
     # The dashboard's control room. Off in one place; see app/control.py.
     app.include_router(control.router)
+
+
+@app.middleware("http")
+async def _public_demo_is_read_only(request: Request, call_next):
+    """In demo mode every write is a 404, not a 403.
+
+    The difference is the point. A 403 tells a visitor there is an endpoint here and
+    they are not allowed to use it, which is an invitation to look for the one that is
+    misconfigured. A 404 says there is nothing here — which, in demo mode, is true:
+    routers that mutate are not mounted, and this middleware is the backstop for
+    anything that slips past that.
+
+    GET, HEAD and OPTIONS pass. The webhook receiver is a POST and is blocked with
+    everything else: a public demo has no signing secret, so every delivery would fail
+    signature verification anyway, and refusing at the door is the clearer answer.
+    """
+    if config.PUBLIC_DEMO and request.method not in ("GET", "HEAD", "OPTIONS"):
+        return JSONResponse({"detail": "Not Found"}, status_code=404)
+    return await call_next(request)
 
 _tick_task: asyncio.Task | None = None
 
@@ -58,6 +103,12 @@ async def _tick_loop() -> None:
 
 @app.on_event("startup")
 async def startup() -> None:
+    # Before anything else, including opening the database. A process that must not run
+    # should not have created a file by the time it finds out.
+    config.assert_demo_safe()
+    if config.PUBLIC_DEMO:
+        log.info("PUBLIC DEMO: every write route returns 404; no provider credential is "
+                 "present, and boot would have failed if one were")
     db.init()
     log.info("database ready at %s", config.DB_PATH)
     log.info("LLM provider: %s (copy drafting %s)",

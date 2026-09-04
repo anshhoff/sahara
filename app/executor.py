@@ -15,7 +15,7 @@ import logging
 import re
 from typing import Any, Optional
 
-from app import audit, cases, clock, config, db, invariants, llm
+from app import audit, cases, clock, config, db, economics, fencing, inbound, invariants, llm
 
 log = logging.getLogger(__name__)
 
@@ -23,6 +23,12 @@ log = logging.getLogger(__name__)
 # runner lowers or raises it with --live-links; everything above the cap is simulated
 # and recorded honestly as such.
 _live_link_budget = config.LIVE_LINKS_MAX
+# The update-link ladder's second rung has a budget of its own. It has to: a Payment
+# Link is a resource the account exhausts for good, an Order is an ordinary rate-limited
+# call, and spending them from one counter would either strand the cheap rung or
+# over-spend the scarce one. Both are live calls on a live key, so both are budgeted,
+# and `tests/conftest.py` zeroes both.
+_live_order_budget = config.LIVE_ORDERS_MAX
 _razorpay_client: Any = None
 
 
@@ -33,6 +39,15 @@ def set_live_link_budget(n: int) -> None:
 
 def live_link_budget() -> int:
     return _live_link_budget
+
+
+def set_live_order_budget(n: int) -> None:
+    global _live_order_budget
+    _live_order_budget = max(0, int(n))
+
+
+def live_order_budget() -> int:
+    return _live_order_budget
 
 
 def razorpay_client():
@@ -237,16 +252,107 @@ def _create_payment_link(case: dict[str, Any], description: str) -> tuple[Option
         return None, None, {"error": f"{type(exc).__name__}: {exc}"}
 
 
+def _create_checkout_order(case: dict[str, Any]) -> tuple[Optional[str], Optional[str], dict[str, Any]]:
+    """The second rung of the update-link ladder: a real test-mode Order, paid through
+    the console's own /pay page rather than a Razorpay-hosted one.
+
+    This exists because Payment Links are the capped resource and Orders are not. A
+    test-mode account gets 30 Payment Links for the life of the key and no more; past
+    that every create returns `test mode limit of 30 reached for payment_link` and the
+    rung above can only produce a stand-in. The same key keeps creating Orders. The
+    money, the test-mode rails and the resulting webhook are all equally real — what is
+    missing is Razorpay's hosted page, which the console's /pay replaces with Checkout.
+
+    `notes.case_id` is the point of the call: Razorpay copies an order's notes onto the
+    payment it produces, which is how `webhooks.extract()` reads the resulting
+    `order.paid` back to this exact case — the same trick live_demo.py uses on the way in.
+
+    Nothing is sent to anybody here either. An Order is inert until someone opens it.
+    """
+    global _live_order_budget
+    if _live_order_budget <= 0 or not razorpay_configured():
+        return None, None, {"skipped": "live order budget exhausted or Razorpay not configured"}
+    try:
+        # Spent before the call and never refunded, for the same fail-closed reason the
+        # Payment Link budget is: a refund on error turns a persistently failing
+        # endpoint into an unbounded retry loop.
+        _live_order_budget -= 1
+        resp = razorpay_client().order.create(
+            {
+                "amount": int(case["amount_at_risk_paise"]),
+                "currency": case["currency"],
+                "notes": {
+                    "case_id": case["id"],
+                    "case_source": "update-link",
+                    "synthetic": str(bool(case["synthetic"])).lower(),
+                },
+            }
+        )
+        order_id = resp.get("id")
+        if not order_id:
+            return None, None, {"error": "order.create returned no id"}
+        url = f"{config.PUBLIC_BASE_URL}/pay?order_id={order_id}&case_id={case['id']}"
+        return order_id, url, resp
+    except Exception as exc:
+        log.warning("Checkout Order creation failed for case %s: %s", case["id"], exc)
+        return None, None, {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def _update_link_surface(
+    case: dict[str, Any], description: str
+) -> tuple[str, str, Optional[str], str, dict[str, Any]]:
+    """Produce the best payable URL this account can still produce, and say which it is.
+
+    Returns `(mode, surface, razorpay_ref, url, payload)`. The ladder descends in
+    realism and never climbs back: Payment Link -> Order + Checkout -> a stand-in URL
+    that goes nowhere. Each rung records why it was reached, because the difference
+    between "a customer could pay this" and "this is a placeholder" is the one thing
+    about an execution record a reader cannot afford to have smoothed over.
+
+    `mode` stays the two-valued answer it has always been — did a real test-mode call
+    happen, or not — because that is what the schema CHECK constrains and what
+    `metrics.execution_modes()` buckets on. Both live rungs are equally real Razorpay
+    calls on the same key; `surface` carries which endpoint served it, in the payload
+    where a new value costs nobody a migration.
+    """
+    attempts: dict[str, Any] = {}
+    want = config.UPDATE_LINK_MODE
+
+    if want in ("auto", "payment_link"):
+        link_id, short_url, payload = _create_payment_link(case, description)
+        if link_id and short_url:
+            return "razorpay_test", "payment_link", link_id, short_url, payload
+        attempts["payment_link"] = payload
+        if want == "payment_link":
+            return "simulated", "none", None, _simulated_link(case), payload
+
+    if want in ("auto", "order"):
+        order_id, url, payload = _create_checkout_order(case)
+        if order_id and url:
+            # Carry the Payment Link's refusal forward. An operator reading this record
+            # should see that the better rung was tried and why it failed, not merely
+            # that an Order happened to be the thing that got created.
+            return "razorpay_test", "checkout_order", order_id, url, (
+                {**payload, "fell_back_from": attempts} if attempts else payload
+            )
+        attempts["order"] = payload
+
+    return (
+        "simulated",
+        "none",
+        None,
+        _simulated_link(case),
+        attempts or {"skipped": f"UPDATE_LINK_MODE={want} permits no live surface"},
+    )
+
+
 def send_update_link(case: dict[str, Any], action: str = "SEND_UPDATE_LINK") -> dict[str, Any]:
-    """Create (optionally real) a Payment Link and log a simulated notification."""
+    """Create a payable link and log a simulated notification. Nothing is transmitted."""
     description = (
         f"{config.SYNTHETIC_DISCLOSURE} Update payment for subscription "
         f"{case['subscription_id']} — Rs {_amount_str(case)}"
     )
-    link_id, short_url, payload = _create_payment_link(case, description)
-
-    mode = "razorpay_test" if link_id else "simulated"
-    url = short_url or _simulated_link(case)
+    mode, surface, link_id, url, payload = _update_link_surface(case, description)
 
     text, copy_source, validation = build_copy(case, action)
     message = inject_link(text, url)
@@ -262,6 +368,9 @@ def send_update_link(case: dict[str, Any], action: str = "SEND_UPDATE_LINK") -> 
         "result_payload": {
             "action": "send_update_link" if action == "SEND_UPDATE_LINK" else "send_promise_offer",
             "link_url": url,
+            # Which Razorpay surface produced link_url: a hosted Payment Link, an Order
+            # the console's /pay page opens in Checkout, or nothing at all.
+            "link_surface": surface,
             "notification": "SIMULATED — composed and logged, never transmitted",
             "razorpay_response": payload,
         },
@@ -281,10 +390,122 @@ def send_promise_offer(case: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+# ------------------------------------------------------------------ voice
+# What the customer said, when anything did. In live mode this would be filled by an
+# IVR or telephony webhook; in the batch it is set by scripts/run_batch.py, which is
+# the only thing that can know what a simulated customer would say. A provider hook
+# rather than an import, so app/ never reaches into the simulator — the same boundary
+# that keeps the agent's priors from being scored with the answer key.
+_transcript_provider: Any = None
+
+
+def set_transcript_provider(fn: Any) -> None:
+    global _transcript_provider
+    _transcript_provider = fn
+
+
+def voice_script(case: dict[str, Any], language: Optional[str] = None) -> tuple[str, str]:
+    """(rendered script, language). Registered templates only — an unregistered variant
+    cannot be spoken, because there is nothing to look up."""
+    language = language or config.VOICE_DEFAULT_LANGUAGE
+    if language not in config.VOICE_LANGUAGES:
+        raise ValueError(f"voice language {language!r} is not registered")
+    category = case.get("current_category") or "unknown"
+    skeleton = config.VOICE_TEMPLATES[(category, language)]
+    check = validate_copy(skeleton, case)
+    if not check["ok"]:  # a registered template must never fail its own validator
+        raise AssertionError(
+            f"voice template ({category}, {language}) fails copy validation: {check['problems']}")
+    return render_slots(skeleton, case), language
+
+
+def _link_already_sent(case: dict[str, Any]) -> Optional[str]:
+    """The most recent payable URL this case was actually given, if any.
+
+    A voice call is a follow-up, not a fresh offer: reading out a *second* link when
+    the customer already has one in an SMS is how a recovery flow teaches people to
+    ignore both. Reusing the sent link also keeps this rung from spending a Payment
+    Link or an Order of its own, which matters on an account whose live budget is the
+    scarce thing (see `_update_link_surface`).
+    """
+    for row in db.query(
+        "SELECT result_payload FROM execution_record WHERE case_id = ? ORDER BY rowid DESC",
+        (case["id"],),
+    ):
+        try:
+            url = (json.loads(row["result_payload"] or "{}") or {}).get("link_url")
+        except (TypeError, ValueError):
+            continue
+        if url:
+            return str(url)
+    return None
+
+
+def place_voice_call(case: dict[str, Any]) -> dict[str, Any]:
+    """Escalation rung 3: a call, before a person.
+
+    Simulated by default and recorded honestly as such. `plivo_trial_verified` is the
+    only mode that means a signal actually left this process, and reaching it requires
+    I8 to have passed — which for a synthetic case it cannot, because a synthetic
+    customer has no number.
+
+    The call's *inbound* half is what makes this rung worth more than a third SMS: a
+    person can say when they will pay, and app/inbound.py turns that into a dated,
+    tracked promise. Nothing the customer says can name an amount; there is no field.
+    """
+    script, language = voice_script(case)
+    url = _link_already_sent(case) or _simulated_link(case)
+    message = inject_link(script, url)
+
+    verified = invariants.verified_recipient(case)
+    real = invariants.would_really_transmit(case, "VOICE_CALL") and verified is not None
+    mode = "plivo_trial_verified" if real else "simulated"
+
+    transcript = None
+    if _transcript_provider is not None:
+        try:
+            transcript = _transcript_provider(case)
+        except Exception as exc:      # a broken provider must not fail the call
+            log.warning("transcript provider failed for case %s: %s", case["id"], exc)
+
+    reading = (inbound.read(transcript) if transcript is not None
+               else {"intent": "no_answer", "promised_date": None, "confidence": 1.0,
+                     "rationale": "no inbound transcript for this call", "source": "rule"})
+
+    deadline = clock.plus_hours(clock.now(), config.PROMISE_WINDOW_HOURS)
+    return {
+        "mode": mode,
+        "razorpay_ref": None,
+        "status": "success",
+        "simulated_channel": "voice",
+        "message_copy": message,
+        "copy_source": "static_template",
+        "copy_validation": {"ok": True, "problems": [], "source": "voice_template",
+                            "language": language},
+        "result_payload": {
+            "action": "place_voice_call",
+            "language": language,
+            "script": message,
+            "transmission": ("REAL — a verified, allowlisted recipient (I8)" if real else
+                             "SIMULATED — composed and logged, never dialled"),
+            "recipient": verified,
+            "link_url": url,
+            # The grace window before a human takes over, identical in shape to
+            # promise-to-pay's. A tracked promise, when there is one, overrides it: the
+            # date the customer named is a better deadline than one we invented.
+            "voice_deadline": clock.to_iso(deadline),
+            "voice_window_hours": config.PROMISE_WINDOW_HOURS,
+            "inbound_transcript": transcript,
+            "inbound_reading": reading,
+        },
+    }
+
+
 _HANDLERS = {
     "RETRY_LATER": lambda case: retry_charge(case),
     "SEND_UPDATE_LINK": lambda case: send_update_link(case),
     "PROMISE_TO_PAY": lambda case: send_promise_offer(case),
+    "VOICE_CALL": lambda case: place_voice_call(case),
 }
 
 
@@ -340,6 +561,38 @@ def execute_decision(decision: dict[str, Any]) -> Optional[dict[str, Any]]:
         )
         return None
 
+    # ------------------------------------------------------------- fence 1 of 2
+    # Look before you leap. Every invariant above re-read the CASE — our record of the
+    # world, exactly as stale as the last webhook that happened to arrive. This re-reads
+    # the world itself, immediately before a message goes out, because between deciding
+    # and acting the customer may already have paid. Contact actions only: a silent
+    # mandate re-charge of an already-settled subscription is a no-op at the gateway,
+    # not a message to somebody who owes nothing.
+    #
+    # Placed BEFORE the claim and before reserve_attempt, so a fenced dispatch consumes
+    # neither. Nothing forbade this message; there was simply nothing left to collect.
+    if decision["action"] in config.CONTACT_ACTIONS:
+        fence = fencing.guard_dispatch(case, decision["action"], decision_id=decision["id"])
+        if fence.blocks:
+            db.update("intervention_decision", decision["id"], {"status": "blocked_by_fence"})
+            cases.transition(
+                case["id"], "stopped_already_settled",
+                summary=(f"Attempt {decision['attempt_number']} fenced before dispatch: "
+                         f"{fence.reason}. No contact was sent."),
+                detail={
+                    "fence": fencing.PRE_DISPATCH,
+                    "verdict": fence.verdict,
+                    "source": fence.source,
+                    "reason": fence.reason,
+                    "evidence": fence.detail,
+                    "decision_id": decision["id"],
+                    "blocked_action": decision["action"],
+                    "note": ("a correctness stop, not a safety one: no rule forbade this "
+                             "message, the money had already arrived"),
+                },
+            )
+            return None
+
     handler = _HANDLERS.get(decision["action"])
     if handler is None:  # STOP_HANDOFF never reaches the executor; policy closes the case
         raise ValueError(f"action {decision['action']} is not executable")
@@ -377,7 +630,8 @@ def execute_decision(decision: dict[str, Any]) -> Optional[dict[str, Any]]:
         return None
 
     try:
-        result = handler(case)
+        with clock.timed("execute", case["id"]):
+            result = handler(case)
     except Exception as exc:
         log.exception("execution failed for decision %s", decision["id"])
         result = {
@@ -405,6 +659,10 @@ def execute_decision(decision: dict[str, Any]) -> Optional[dict[str, Any]]:
             if result.get("copy_validation") is not None else None,
             "status": result["status"],
             "result_payload": json.dumps(result.get("result_payload"), default=str, sort_keys=True),
+            # Booked whether the execution succeeded or failed: a message that went out
+            # and did not work still cost what it cost, and a cost ledger that only
+            # counts successes is a cost ledger that flatters itself.
+            "cost_paise": economics.execution_cost_paise(decision["action"]),
             "executed_at": executed_at,
             "synthetic": case["synthetic"],
         },
@@ -417,6 +675,7 @@ def execute_decision(decision: dict[str, Any]) -> Optional[dict[str, Any]]:
          f"({result['status']})"),
         {
             "execution_id": execution_id,
+            "cost_paise": economics.execution_cost_paise(decision["action"]),
             "decision_id": decision["id"],
             "action": decision["action"],
             "mode": result["mode"],
@@ -428,6 +687,45 @@ def execute_decision(decision: dict[str, Any]) -> Optional[dict[str, Any]]:
             "result_payload": result.get("result_payload"),
         },
     )
+    # The inbound half of a voice call. Recorded only AFTER the execution row exists, so
+    # a promise always has an execution to point at, and so a failure here cannot leave
+    # a promise with no call behind it.
+    reading = (result.get("result_payload") or {}).get("inbound_reading")
+    if decision["action"] == "VOICE_CALL" and isinstance(reading, dict):
+        cases.record_promise(case["id"], reading, execution_id=execution_id)
+        if reading.get("intent") in inbound.SUPPRESSING_INTENTS:
+            # Said on a call, honoured everywhere: suppression is per PERSON (I6), so it
+            # reaches this customer's other subscriptions too. The model produced the
+            # reading; the write is deterministic code acting on a closed enum.
+            cases.suppress_customer(
+                case["customer_id"], "opt_out", source="voice_call",
+                note=f"inbound reading: {reading.get('intent')}")
+
+    # ------------------------------------------------------------- fence 2 of 2
+    # Verify after write. The link exists and cannot be un-created; what can still be
+    # done is cancel it and say so. The compensation entry is appended whether or not
+    # the cancellation succeeds — the attempt is the evidence, and the failed one is
+    # the entry a reader most needs to see.
+    if decision["action"] in config.CONTACT_ACTIONS:
+        after = fencing.verify_after_write(
+            cases.get(case["id"]), decision["action"], result.get("razorpay_ref"),
+            decision_id=decision["id"], execution_id=execution_id)
+        if after.blocks:
+            cases.transition(
+                case["id"], "stopped_already_settled",
+                summary=(f"Attempt {decision['attempt_number']} was dispatched, then the world "
+                         f"moved: {after.reason}. Compensation recorded."),
+                detail={
+                    "fence": fencing.POST_DISPATCH,
+                    "verdict": after.verdict,
+                    "source": after.source,
+                    "reason": after.reason,
+                    "evidence": after.detail,
+                    "decision_id": decision["id"],
+                    "execution_id": execution_id,
+                },
+            )
+
     return db.row_to_dict(db.query_one("SELECT * FROM execution_record WHERE id = ?", (execution_id,)))
 
 
@@ -446,24 +744,63 @@ def due_decisions(now_iso: Optional[str] = None, include_synthetic: bool = True)
     )
 
 
+def _sweep_tracked_promises(include_synthetic: bool = True) -> int:
+    """A promise the customer actually made, whose named day is over.
+
+    This runs BEFORE the fixed-window sweep below and takes precedence over it: when
+    someone has said "Friday", Friday is the deadline, not a 72-hour clock we started
+    when we happened to call. `cases.transition` resolves the promise as broken as part
+    of closing the case, so a case can never close leaving a promise dangling open.
+    """
+    closed = 0
+    for promise in cases.due_promises(include_synthetic):
+        case = cases.get(promise["case_id"])
+        if case is None or case["status"] != "open":
+            continue
+        cases.transition(
+            case["id"], "stopped_handoff",
+            summary=(f"The customer said they would pay on {promise['promised_date']}. "
+                     "That day has passed unpaid; handed off to the human queue."),
+            detail={"promise_id": promise["id"],
+                    "promised_date": promise["promised_date"],
+                    "due_at": promise["due_at"],
+                    "reading_source": promise["source"],
+                    "execution_id": promise["execution_id"]},
+        )
+        closed += 1
+    return closed
+
+
 def _close_lapsed_promises(include_synthetic: bool = True) -> int:
-    """A promise-to-pay that was not honoured inside its window goes to the human
-    queue — it is never retried, because attempt 3 was the last one."""
+    """A promise-to-pay or a voice call whose grace window ran out goes to the human
+    queue — never retried, because attempt 3 was the last one.
+
+    Cases with an OPEN tracked promise are skipped: their deadline is the day the
+    customer named, swept by `_sweep_tracked_promises`, and applying a fixed 72-hour
+    window on top of it would hand off someone who promised next Tuesday and still has
+    until Tuesday.
+    """
     closed = 0
     rows = db.query(
-        "SELECT e.case_id AS case_id, e.executed_at AS executed_at, e.id AS execution_id"
+        "SELECT e.case_id AS case_id, e.executed_at AS executed_at, e.id AS execution_id,"
+        "       e.action AS action"
         " FROM execution_record e JOIN recovery_case c ON c.id = e.case_id"
-        " WHERE e.action = 'PROMISE_TO_PAY' AND c.status = 'open'"
+        " WHERE e.action IN ('PROMISE_TO_PAY','VOICE_CALL') AND c.status = 'open'"
         + ("" if include_synthetic else " AND c.synthetic = 0")
     )
     for row in rows:
+        if cases.open_promise(row["case_id"]) is not None:
+            continue
         deadline = clock.plus_hours(clock.parse_iso(row["executed_at"]), config.PROMISE_WINDOW_HOURS)
         if clock.now() >= deadline:
+            what = ("Promise-to-pay window" if row["action"] == "PROMISE_TO_PAY"
+                    else "Voice-call follow-up window")
             cases.transition(
                 row["case_id"], "stopped_handoff",
-                summary=(f"Promise-to-pay window of {config.PROMISE_WINDOW_HOURS}h lapsed unpaid; "
+                summary=(f"{what} of {config.PROMISE_WINDOW_HOURS}h lapsed unpaid; "
                          "handed off to the human queue with a complete case file"),
-                detail={"execution_id": row["execution_id"], "promise_deadline": clock.to_iso(deadline)},
+                detail={"execution_id": row["execution_id"], "action": row["action"],
+                        "promise_deadline": clock.to_iso(deadline)},
             )
             closed += 1
     return closed
@@ -517,11 +854,13 @@ def tick(include_synthetic: bool = True) -> dict[str, Any]:
         record = execute_decision(decision)
         if record is not None:
             executions.append(record)
+    tracked = _sweep_tracked_promises(include_synthetic)
     promises = _close_lapsed_promises(include_synthetic)
     expired = _close_expired_episodes(include_synthetic)
     return {
         "at": clock.now_iso(),
         "executions": executions,
+        "promises_broken": tracked,
         "promises_lapsed": promises,
         "episodes_expired": expired,
     }

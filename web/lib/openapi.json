@@ -1,0 +1,1335 @@
+{
+  "components": {
+    "schemas": {
+      "BatchRequest": {
+        "properties": {
+          "holdout": {
+            "default": 0.35,
+            "description": "fraction of cases assigned to the untouched control arm",
+            "maximum": 0.6,
+            "minimum": 0.0,
+            "title": "Holdout",
+            "type": "number"
+          },
+          "live_links": {
+            "default": 0,
+            "description": "real test-mode Payment Links to spend; 0 keeps the run offline",
+            "maximum": 5.0,
+            "minimum": 0.0,
+            "title": "Live Links",
+            "type": "integer"
+          },
+          "n": {
+            "default": 80,
+            "maximum": 400.0,
+            "minimum": 10.0,
+            "title": "N",
+            "type": "integer"
+          },
+          "seed": {
+            "default": 42,
+            "title": "Seed",
+            "type": "integer"
+          }
+        },
+        "title": "BatchRequest",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "InjectRequest": {
+        "properties": {
+          "amount_rupees": {
+            "default": 499.0,
+            "exclusiveMinimum": 0.0,
+            "maximum": 100000.0,
+            "title": "Amount Rupees",
+            "type": "number"
+          },
+          "category": {
+            "default": "card_expired",
+            "title": "Category",
+            "type": "string"
+          }
+        },
+        "title": "InjectRequest",
+        "type": "object"
+      },
+      "StormRequest": {
+        "properties": {
+          "distinct": {
+            "default": false,
+            "description": "false: n copies of ONE event (delivery retry). true: n different events for one subscription (a burst of real failures).",
+            "title": "Distinct",
+            "type": "boolean"
+          },
+          "n": {
+            "default": 10,
+            "maximum": 50.0,
+            "minimum": 2.0,
+            "title": "N",
+            "type": "integer"
+          }
+        },
+        "title": "StormRequest",
+        "type": "object"
+      },
+      "TestsRequest": {
+        "properties": {
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "a single test file under tests/, or null for the whole suite",
+            "title": "Path"
+          }
+        },
+        "title": "TestsRequest",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "Failed Subscription Recovery Agent \u2014 Razorpay AI Buildathon, Track 03: AI Revenue Recovery",
+    "title": "Sahara",
+    "version": "1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/audit/verify": {
+      "get": {
+        "description": "Recompute the audit log's hash chain and report the first break, if any.\n\nThis is the endpoint that makes \"append-only\" checkable by someone who does not\ntrust the code: edit one summary in the database with sqlite3 and this turns red,\nnaming the row. `head` is a one-line fingerprint of the whole run.",
+        "operationId": "audit_verify_api_audit_verify_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Audit Verify Api Audit Verify Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Audit Verify",
+        "tags": [
+          "dashboard"
+        ]
+      }
+    },
+    "/api/calibration": {
+      "get": {
+        "description": "`P_RECOVER_PRIOR` scored against what actually happened: Brier, ECE, a\nreliability table and a per-(category, action) gap. These priors drive every EV\ngate in the system and had never been checked against a single realised outcome.",
+        "operationId": "calibration_api_calibration_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Calibration Api Calibration Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Calibration",
+        "tags": [
+          "dashboard"
+        ]
+      }
+    },
+    "/api/cases": {
+      "get": {
+        "operationId": "list_cases_api_cases_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "category",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Category"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response List Cases Api Cases Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Cases",
+        "tags": [
+          "dashboard"
+        ]
+      }
+    },
+    "/api/cases/{case_id}": {
+      "get": {
+        "description": "The handoff artifact: this response IS the case file a human picks up.",
+        "operationId": "get_case_api_cases__case_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "case_id",
+            "required": true,
+            "schema": {
+              "title": "Case Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Case Api Cases  Case Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Case",
+        "tags": [
+          "dashboard"
+        ]
+      }
+    },
+    "/api/cases/{case_id}/opt-out": {
+      "post": {
+        "description": "Demo helper for invariant I3: mark the customer opted out. The next gate \u2014\npre-decision or pre-execution, whichever comes first \u2014 stops the case.",
+        "operationId": "opt_out_api_cases__case_id__opt_out_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "case_id",
+            "required": true,
+            "schema": {
+              "title": "Case Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Opt Out Api Cases  Case Id  Opt Out Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Opt Out",
+        "tags": [
+          "dashboard"
+        ]
+      }
+    },
+    "/api/categories": {
+      "get": {
+        "operationId": "categories_api_categories_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response Categories Api Categories Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Categories",
+        "tags": [
+          "dashboard"
+        ]
+      }
+    },
+    "/api/control/batch": {
+      "post": {
+        "description": "Regenerate the synthetic cases and replay the whole batch, resetting the database.\n\nThis is the README's reproduce command, run verbatim \u2014 including the seed, so the\nrun is the same one a judge gets from their own terminal.",
+        "operationId": "run_batch_api_control_batch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Run Batch Api Control Batch Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Run Batch",
+        "tags": [
+          "control"
+        ]
+      }
+    },
+    "/api/control/inject": {
+      "post": {
+        "description": "Push one failure through the live pipeline and hand back the case it opened.\n\nThe payload is a real Razorpay event body and it enters through `intake()`, so this\nwalks detect \u2192 diagnose \u2192 gate \u2192 decide exactly like a delivery from Razorpay. The\nonly difference is `source`.",
+        "operationId": "inject_api_control_inject_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InjectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Inject Api Control Inject Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Inject",
+        "tags": [
+          "control"
+        ]
+      }
+    },
+    "/api/control/jobs": {
+      "get": {
+        "operationId": "list_jobs_api_control_jobs_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response List Jobs Api Control Jobs Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Jobs",
+        "tags": [
+          "control"
+        ]
+      }
+    },
+    "/api/control/jobs/{job_id}": {
+      "get": {
+        "description": "Poll for output. `after` is the `next` cursor from the previous poll, so the\ndashboard streams a long run without re-sending what it already has.",
+        "operationId": "get_job_api_control_jobs__job_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "title": "After",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Job Api Control Jobs  Job Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Job",
+        "tags": [
+          "control"
+        ]
+      }
+    },
+    "/api/control/state": {
+      "get": {
+        "description": "What the control room is allowed to do, and what it is doing right now.",
+        "operationId": "state_api_control_state_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response State Api Control State Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "State",
+        "tags": [
+          "control"
+        ]
+      }
+    },
+    "/api/control/storm": {
+      "post": {
+        "description": "Fire n webhook deliveries simultaneously, against the live database.\n\nThis is `tests/test_concurrency.py` run against the running server instead of a temp\ndatabase: the same barrier, the same `intake()`. Duplicate delivery must collapse to\none case; a burst of distinct failures on one subscription must still be one case,\nbecause two open cases would mean two independent attempt budgets against the same\ncustomer.",
+        "operationId": "storm_api_control_storm_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StormRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Storm Api Control Storm Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Storm",
+        "tags": [
+          "control"
+        ]
+      }
+    },
+    "/api/control/tests": {
+      "post": {
+        "description": "Run the suite exactly as CI would: same interpreter, same working directory.",
+        "operationId": "run_tests_api_control_tests_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Run Tests Api Control Tests Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Run Tests",
+        "tags": [
+          "control"
+        ]
+      }
+    },
+    "/api/control/tick": {
+      "post": {
+        "description": "Run one iteration of the loop by hand, instead of waiting out the 30s timer.",
+        "operationId": "tick_api_control_tick_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Tick Api Control Tick Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Tick",
+        "tags": [
+          "control"
+        ]
+      }
+    },
+    "/api/declined": {
+      "get": {
+        "description": "Cases the agent could have messaged and deliberately did not, with the reason\nfor each. What it declined to do is a harder claim than what it achieved.",
+        "operationId": "declined_api_declined_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Declined Api Declined Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Declined",
+        "tags": [
+          "dashboard"
+        ]
+      }
+    },
+    "/api/demo/case": {
+      "get": {
+        "description": "Poll target for the pipeline page: resolves either a demo_id (a real checkout\norder's subscription_id note) or a case_id (handed back directly by\n/api/control/inject) to whatever case it points at, and returns the same rich\npayload as GET /api/cases/{id} so the page can render the pipeline live.",
+        "operationId": "demo_case_api_demo_case_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "demo_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Demo Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "case_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Case Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Demo Case Api Demo Case Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Demo Case",
+        "tags": [
+          "live-demo"
+        ]
+      }
+    },
+    "/api/demo/config": {
+      "get": {
+        "operationId": "demo_config_api_demo_config_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Demo Config Api Demo Config Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Demo Config",
+        "tags": [
+          "live-demo"
+        ]
+      }
+    },
+    "/api/demo/force-tick": {
+      "post": {
+        "description": "Demo-only clock skip: a real `tick()` only executes decisions already past\ntheir real scheduled_for, and RETRY_LATER is genuinely scheduled hours out \u2014 the\nsame wall-clock discipline the live loop runs under (see main.py's tick loop).\n\nWaiting out real hours mid-demo isn't practical, so this does exactly what\nmanually editing scheduled_for and re-running tick would do: it pulls this one\ncase's still-scheduled decision to now, then calls the same executor.tick() the\nbackground loop calls. Nothing about execute_decision's own logic \u2014 invariant\nre-checks, ExecutionRecord writing, attempt reservation \u2014 is bypassed.",
+        "operationId": "demo_force_tick_api_demo_force_tick_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "demo_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Demo Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "case_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Case Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Demo Force Tick Api Demo Force Tick Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Demo Force Tick",
+        "tags": [
+          "live-demo"
+        ]
+      }
+    },
+    "/api/demo/order": {
+      "post": {
+        "description": "A real Razorpay Order for a one-time payment. No subscription, no mandate\nregistration \u2014 the part of this account's test mode that is actually broken.",
+        "operationId": "create_demo_order_api_demo_order_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Demo Order Api Demo Order Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Create Demo Order",
+        "tags": [
+          "live-demo"
+        ]
+      }
+    },
+    "/api/demo/simulate": {
+      "post": {
+        "description": "Stands in for the next real-world signal a live Sahara would eventually get on\nits own: whether a silent retry actually cleared, or whether the customer paid (or\nignored) an update link. Enters through the identical `webhooks.intake()` every\nreal delivery uses \u2014 `source=\"synthetic\"` is the only difference \u2014 exactly like\n`/api/control/inject`, just addressed at an existing case instead of opening a\nfresh one.",
+        "operationId": "demo_simulate_api_demo_simulate_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "outcome",
+            "required": true,
+            "schema": {
+              "title": "Outcome",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "demo_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Demo Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "case_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Case Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Demo Simulate Api Demo Simulate Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Demo Simulate",
+        "tags": [
+          "live-demo"
+        ]
+      }
+    },
+    "/api/fencing": {
+      "get": {
+        "description": "The dispatch-fencing claim, with its denominator attached.\n\n\"Outreach to already-settled customers: 0\" is not a claim on its own \u2014 0 of what?\nThis returns the numerator, the denominator, the per-phase verdict counts including\n`unverified`, and every compensation entry, so the zero is checkable rather than\nasserted.",
+        "operationId": "fencing_stats_api_fencing_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Fencing Stats Api Fencing Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Fencing Stats",
+        "tags": [
+          "dashboard"
+        ]
+      }
+    },
+    "/api/health": {
+      "get": {
+        "operationId": "health_api_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Health Api Health Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health",
+        "tags": [
+          "dashboard"
+        ]
+      }
+    },
+    "/api/latency": {
+      "get": {
+        "description": "Wall-clock p50/p95 per pipeline stage.",
+        "operationId": "latency_api_latency_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Latency Api Latency Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Latency",
+        "tags": [
+          "dashboard"
+        ]
+      }
+    },
+    "/api/lift-by-category": {
+      "get": {
+        "description": "Lift with a confidence interval, split by failure cause \u2014 including the\ncategories where the agent does nothing. A table in which every row is a win is a\ntable nobody should believe.",
+        "operationId": "lift_by_category_api_lift_by_category_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response Lift By Category Api Lift By Category Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Lift By Category",
+        "tags": [
+          "dashboard"
+        ]
+      }
+    },
+    "/api/mechanism": {
+      "get": {
+        "description": "What the agent is, as data: the policy table it chooses from, the guardrails it\ncannot cross, and how many times each one actually fired in this batch.\n\nThe dashboard renders this instead of hardcoding a copy of the rules. A gate that\nis described in one place and enforced in another eventually describes something\nthe code no longer does.",
+        "operationId": "mechanism_api_mechanism_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Mechanism Api Mechanism Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Mechanism",
+        "tags": [
+          "dashboard"
+        ]
+      }
+    },
+    "/api/metrics/trace/{metric}": {
+      "get": {
+        "description": "Where a headline number comes from: the exact case ids behind it.",
+        "operationId": "trace_api_metrics_trace__metric__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "metric",
+            "required": true,
+            "schema": {
+              "title": "Metric",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Trace Api Metrics Trace  Metric  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Trace",
+        "tags": [
+          "dashboard"
+        ]
+      }
+    },
+    "/api/promises": {
+      "get": {
+        "description": "Dated promises the customer actually made, and whether they held.",
+        "operationId": "promise_stats_api_promises_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Promise Stats Api Promises Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Promise Stats",
+        "tags": [
+          "dashboard"
+        ]
+      }
+    },
+    "/api/summary": {
+      "get": {
+        "operationId": "summary_api_summary_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Summary Api Summary Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Summary",
+        "tags": [
+          "dashboard"
+        ]
+      }
+    },
+    "/api/suppression": {
+      "get": {
+        "description": "Who the agent will not contact, and why. Invariant I6 reads this table.",
+        "operationId": "suppression_list_api_suppression_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Suppression List Api Suppression Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Suppression List",
+        "tags": [
+          "dashboard"
+        ]
+      }
+    },
+    "/api/suppression/{customer_id}": {
+      "post": {
+        "description": "Add a customer to the suppression list.\n\nDeliberately has no counterpart that removes one. Un-suppressing someone is\nre-consenting on their behalf, which is not an operation this system should make\none HTTP call away; it belongs in the database, deliberately, with a person\naccountable for it.",
+        "operationId": "suppress_api_suppression__customer_id__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "customer_id",
+            "required": true,
+            "schema": {
+              "title": "Customer Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "reason",
+            "required": false,
+            "schema": {
+              "default": "manual",
+              "title": "Reason",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Suppress Api Suppression  Customer Id  Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Suppress",
+        "tags": [
+          "dashboard"
+        ]
+      }
+    },
+    "/api/voice-calls": {
+      "get": {
+        "description": "Every voice call placed, the transcript, and the reading taken from it.\n\nDeliberately NOT folded into /summary. The transcripts are the one payload here\nthat grows with the batch rather than with the number of metrics, and a summary\nendpoint that carries ninety utterances is a summary endpoint nobody can read.",
+        "operationId": "voice_calls_api_voice_calls_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Voice Calls Api Voice Calls Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Voice Calls",
+        "tags": [
+          "dashboard"
+        ]
+      }
+    },
+    "/healthz": {
+      "get": {
+        "operationId": "healthz_healthz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Healthz Healthz Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Healthz"
+      }
+    },
+    "/webhooks/razorpay": {
+      "post": {
+        "description": "Signature failure returns 400 and touches nothing \u2014 no row of any kind is\ncreated for an unverified body.",
+        "operationId": "razorpay_webhook_webhooks_razorpay_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Razorpay Webhook"
+      }
+    }
+  }
+}

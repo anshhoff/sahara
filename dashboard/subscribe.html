@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sahara Cloud</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --ink: #1a1a2e; --sub: #6b7280; --line: #e5e7eb; --bg: #fafafa;
+    --accent: #4f46e5; --accent-ink: #ffffff;
+    --ok: #0a7d33; --ok-soft: #e8f7ee;
+    --warn: #92400e; --warn-soft: #fef3c7;
+    --danger: #b91c1c; --danger-soft: #fee2e2;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    display: flex; justify-content: center; padding: 56px 20px;
+  }
+  .wrap { max-width: 420px; width: 100%; }
+  .brand { text-align: center; font-weight: 700; letter-spacing: -0.01em; margin-bottom: 28px; font-size: 1.1rem; }
+  .card {
+    background: #fff; border: 1px solid var(--line); border-radius: 16px;
+    padding: 28px; box-shadow: 0 1px 3px rgba(0,0,0,.04), 0 10px 30px -12px rgba(0,0,0,.12);
+  }
+  .plan-name { font-size: 1.3rem; font-weight: 700; margin: 0 0 4px; }
+  .plan-desc { color: var(--sub); font-size: .92rem; margin: 0 0 20px; }
+  .price { font-size: 2.1rem; font-weight: 800; margin: 0 0 2px; }
+  .price span { font-size: 1rem; font-weight: 500; color: var(--sub); }
+  .features { list-style: none; padding: 0; margin: 18px 0 24px; }
+  .features li { padding: 6px 0; font-size: .9rem; color: #374151; display: flex; gap: 8px; }
+  .features li::before { content: "✓"; color: var(--accent); font-weight: 700; }
+  button.primary {
+    width: 100%; background: var(--accent); color: var(--accent-ink); border: none;
+    border-radius: 10px; padding: 14px; font-size: 1rem; font-weight: 600; cursor: pointer;
+  }
+  button.primary:disabled { opacity: .55; cursor: not-allowed; }
+  button.secondary {
+    width: 100%; background: #fff; color: var(--ink); border: 1px solid var(--line);
+    border-radius: 10px; padding: 12px; font-size: .92rem; font-weight: 600; cursor: pointer; margin-top: 8px;
+  }
+  button.secondary:hover { background: #f9fafb; }
+  .status-card { margin-top: 18px; border-radius: 14px; padding: 20px; }
+  .status-card.pending  { background: #f3f4f6; }
+  .status-card.warn     { background: var(--warn-soft); }
+  .status-card.ok       { background: var(--ok-soft); }
+  .status-card.danger   { background: var(--danger-soft); }
+  .status-title { font-weight: 700; margin: 0 0 6px; font-size: 1rem; }
+  .status-body  { font-size: .88rem; color: #374151; line-height: 1.5; margin: 0 0 14px; }
+  .link-box {
+    background: #fff; border: 1px dashed var(--accent); border-radius: 8px; padding: 10px 12px;
+    font-size: .82rem; word-break: break-all; margin-bottom: 12px;
+  }
+  .link-box a { color: var(--accent); font-weight: 600; }
+  .btn-row { display: flex; gap: 8px; }
+  .btn-row button { flex: 1; }
+  .footnote { font-size: .76rem; color: var(--sub); margin-top: 10px; line-height: 1.5; }
+  .ops-link { text-align: center; margin-top: 18px; font-size: .82rem; }
+  .ops-link a { color: var(--sub); }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="brand">☁️ Sahara Cloud</div>
+
+  <div class="card">
+    <p class="plan-name">Pro Plan</p>
+    <p class="plan-desc">Everything you need to ship, monitored around the clock.</p>
+    <p class="price">₹499 <span>/ month</span></p>
+    <ul class="features">
+      <li>Unlimited projects</li>
+      <li>Priority support</li>
+      <li>Advanced analytics</li>
+    </ul>
+    <button class="primary" id="subscribe-btn">Subscribe</button>
+  </div>
+
+  <div id="status-card" class="status-card hidden"></div>
+
+  <div class="ops-link">
+    <a id="ops-link" href="#" target="sahara-ops">See what's happening behind the scenes →</a>
+  </div>
+</div>
+
+<script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+<script>
+  const subscribeBtn = document.getElementById('subscribe-btn');
+  const statusCard = document.getElementById('status-card');
+  const opsLink = document.getElementById('ops-link');
+
+  let demoId = null;
+  let pollTimer = null;
+  let lastRenderedKey = null;
+
+  function setStatusCard(kind, title, bodyHtmlNodes, buttons) {
+    statusCard.className = 'status-card ' + kind;
+    statusCard.classList.remove('hidden');
+    statusCard.textContent = '';
+
+    const h = document.createElement('p');
+    h.className = 'status-title';
+    h.textContent = title;
+    statusCard.appendChild(h);
+
+    const b = document.createElement('div');
+    b.className = 'status-body';
+    (bodyHtmlNodes || []).forEach((n) => b.appendChild(n));
+    statusCard.appendChild(b);
+
+    if (buttons && buttons.length) {
+      const row = document.createElement('div');
+      row.className = 'btn-row';
+      buttons.forEach((btn) => row.appendChild(btn));
+      statusCard.appendChild(row);
+    }
+  }
+
+  function textNode(text) {
+    const p = document.createElement('p');
+    p.style.margin = '0 0 8px';
+    p.textContent = text;
+    return p;
+  }
+
+  function makeButton(label, cls, onClick) {
+    const b = document.createElement('button');
+    b.className = cls;
+    b.textContent = label;
+    b.addEventListener('click', onClick);
+    return b;
+  }
+
+  function addFootnote(text) {
+    const f = document.createElement('p');
+    f.className = 'footnote';
+    f.textContent = text;
+    statusCard.appendChild(f);
+  }
+
+  async function callDemo(path, params) {
+    const qs = new URLSearchParams(params || {});
+    const url = path + (qs.toString() ? '?' + qs.toString() : '');
+    const res = await fetch(url, { method: 'POST' });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail || (path + ' failed: ' + res.status));
+    }
+    return res.json();
+  }
+
+  function render(data) {
+    if (!data || !data.case) return;
+    const c = data.case;
+    const decisions = data.decisions || [];
+    const latest = decisions.length ? decisions[decisions.length - 1] : null;
+    const trail = data.audit_trail || [];
+    const lastAudit = trail.length ? trail[trail.length - 1] : null;
+
+    // Avoid rebuilding the DOM (and losing button focus) on every 1s poll when
+    // nothing has actually changed.
+    const key = c.status + '|' + c.attempt_count + '|' + (latest ? latest.id + latest.status : '');
+    if (key === lastRenderedKey) return;
+    lastRenderedKey = key;
+
+    if (c.status === 'recovered') {
+      setStatusCard('ok', "🎉 You're all set!",
+        [textNode('Your payment went through. Welcome to Sahara Cloud Pro.')]);
+      stopPolling();
+      return;
+    }
+
+    if (c.status === 'stopped_unknown') {
+      setStatusCard('warn', "We couldn't tell what went wrong",
+        [textNode('Your payment failed for a reason we could not identify with confidence. ' +
+          "Rather than guess, we've flagged this for a person to follow up with you directly.")]);
+      stopPolling();
+      return;
+    }
+
+    if (c.status.startsWith('stopped_')) {
+      setStatusCard('warn', 'A specialist will reach out',
+        [textNode("We weren't able to collect your payment automatically. " +
+          "We've stopped trying on our own and handed this to our support team.")]);
+      stopPolling();
+      return;
+    }
+
+    // status === 'open' from here on.
+    if (!latest) {
+      setStatusCard('pending', 'Processing…', [textNode('Setting things up.')]);
+      return;
+    }
+
+    if (latest.status === 'scheduled') {
+      const deferred = lastAudit && /deferred by (I2|I5|I7)/.test(lastAudit.summary || '');
+      if (deferred) {
+        setStatusCard('warn', "We'll reach out again soon", [
+          textNode('Your payment failed. Sahara doesn\'t contact customers outside 09:00–21:00 ' +
+            'IST, so the next step is on hold until then.'),
+          textNode(lastAudit.summary),
+        ], [
+          makeButton('Try now anyway', 'secondary', async () => {
+            await callDemo('/api/demo/force-tick', demoId ? { demo_id: demoId } : { case_id: c.id });
+            lastRenderedKey = null;
+          }),
+        ]);
+        addFootnote('This will likely defer again until real time passes 09:00 IST — that\'s a genuine ' +
+          'guardrail (invariant I5), not a bug.');
+      } else {
+        setStatusCard('pending', 'Payment failed — we\'ll automatically retry', [
+          textNode('This happens sometimes. Sahara will quietly try charging your card again ' +
+            'without bothering you.'),
+        ], [
+          makeButton('⏩ Time passes — run the retry now', 'secondary', async () => {
+            await callDemo('/api/demo/force-tick', demoId ? { demo_id: demoId } : { case_id: c.id });
+            lastRenderedKey = null;
+          }),
+        ]);
+        addFootnote('Sahara only acts again when a new signal arrives — a real retry outcome, or you ' +
+          'telling it what happened. Nothing advances on a timer alone; this button stands in for ' +
+          'that next real signal.');
+      }
+      return;
+    }
+
+    if (latest.status === 'executed') {
+      const ex = latest.execution;
+      const bodyNodes = [];
+      let linkUrl = null;
+      if (ex && ex.result_payload && ex.result_payload.link_url) {
+        linkUrl = ex.result_payload.link_url;
+      }
+
+      // The customer's view says the same thing either way: a link went out. Whether
+      // this run reached Razorpay or fell back to a stand-in is an operator concern,
+      // and the pipeline view reports it with the reason the executor actually
+      // recorded — never guessed at in copy here.
+      const linkIsReal = !!linkUrl && ex.mode === 'razorpay_test';
+      if (linkUrl) {
+        bodyNodes.push(textNode('Your payment failed, so we sent you a link to update it.'));
+        const box = document.createElement('div');
+        box.className = 'link-box';
+        box.appendChild(document.createTextNode(linkIsReal ? 'Real payable link: ' : 'Demo link: '));
+        if (linkIsReal) {
+          const a = document.createElement('a');
+          a.href = linkUrl; a.target = '_blank'; a.textContent = linkUrl;
+          box.appendChild(a);
+        } else {
+          const span = document.createElement('span');
+          span.textContent = linkUrl;
+          box.appendChild(span);
+        }
+        bodyNodes.push(box);
+      } else {
+        bodyNodes.push(textNode('We just tried to charge your card again automatically.'));
+      }
+
+      setStatusCard(linkUrl ? 'warn' : 'pending',
+        linkUrl ? 'Update your payment method' : 'Retrying…',
+        bodyNodes,
+        [
+          makeButton(linkUrl ? 'Simulate: I paid it' : 'Simulate: it succeeded', 'secondary', async () => {
+            await callDemo('/api/demo/simulate', {
+              outcome: 'recovered', ...(demoId ? { demo_id: demoId } : { case_id: c.id }),
+            });
+            lastRenderedKey = null;
+          }),
+          makeButton(linkUrl ? 'Simulate: I ignored it' : 'Simulate: it failed again', 'secondary', async () => {
+            await callDemo('/api/demo/simulate', {
+              outcome: 'failed_again', ...(demoId ? { demo_id: demoId } : { case_id: c.id }),
+            });
+            lastRenderedKey = null;
+          }),
+        ]
+      );
+      addFootnote('These two buttons stand in for the next real-world signal Sahara would eventually ' +
+        'receive on its own — a customer paying (or ignoring) a link, or a retry actually clearing.');
+      if (linkUrl && !linkIsReal) {
+        addFootnote('That link is a stand-in, not a payable Razorpay Payment Link. The pipeline view ' +
+          'shows why this attempt did not create a real one.');
+      }
+      return;
+    }
+
+    setStatusCard('pending', 'Processing…', [textNode('Working on it.')]);
+  }
+
+  async function poll() {
+    if (!demoId) return;
+    try {
+      const res = await fetch('/api/demo/case?demo_id=' + encodeURIComponent(demoId));
+      const data = await res.json();
+      render(data);
+    } catch (err) {
+      // transient network hiccup; next tick retries
+    }
+  }
+
+  function stopPolling() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+
+  subscribeBtn.addEventListener('click', async () => {
+    subscribeBtn.disabled = true;
+    try {
+      const data = await (await fetch('/api/demo/order', { method: 'POST' })).json();
+      demoId = data.demo_id;
+      opsLink.href = '/live-pipeline.html?demo_id=' + encodeURIComponent(demoId);
+      window.open(opsLink.href, 'sahara-ops');
+
+      lastRenderedKey = null;
+      pollTimer = setInterval(poll, 1000);
+      poll();
+
+      const rzp = new Razorpay({
+        key: data.key_id,
+        amount: data.amount,
+        currency: data.currency,
+        order_id: data.order_id,
+        name: 'Sahara Cloud',
+        description: 'Pro Plan — ₹499/month',
+        notes: { case_source: 'live-demo', subscription_id: data.demo_id, customer_id: data.demo_id },
+        handler: function (response) {
+          // A payment that succeeds on the first try never opens a case at all —
+          // cases only exist from a payment.failed onward — so there's nothing to
+          // poll here. Razorpay's own success callback is the only signal.
+          stopPolling();
+          lastRenderedKey = 'first-try-success';
+          setStatusCard('ok', "🎉 You're all set!", [
+            textNode('Your payment went through on the first try. Welcome to Sahara Cloud Pro.'),
+          ]);
+        },
+        modal: { ondismiss: function () { subscribeBtn.disabled = false; } },
+      });
+      rzp.on('payment.failed', function () { /* poll() picks up the open/scheduled state */ });
+      rzp.open();
+    } catch (err) {
+      subscribeBtn.disabled = false;
+      alert('Could not start checkout: ' + err.message);
+    }
+  });
+</script>
+</body>
+</html>
