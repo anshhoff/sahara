@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -21,6 +22,10 @@ from app import api, clock, config, control, db, executor, live_demo, llm, webho
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("recovery-agent")
+
+def _env_list(name: str, default: str) -> list[str]:
+    return (os.environ.get(name) or default).split(",")
+
 
 TICK_INTERVAL_SECONDS = int(os.environ.get("TICK_INTERVAL_SECONDS", "30"))
 DASHBOARD_DIR = Path(config.ROOT) / "dashboard"
@@ -30,6 +35,26 @@ app = FastAPI(
     description="Failed Subscription Recovery Agent — Razorpay AI Buildathon, Track 03: AI Revenue Recovery",
     version="1.0",
 )
+# The Next.js console (web/) runs on its own origin in development. Its READ paths are
+# server components and fetch this API from Node, which no browser policy applies to;
+# the control room is the one client component and its fetches come from the browser,
+# so without this it is the only page that breaks — which is exactly what happened.
+#
+# Development origins only, and never `*`: this API is unauthenticated by design on a
+# single-operator local app, and a wildcard would let any page the operator happens to
+# have open drive the control room. `WEB_ORIGINS` widens it for a real deployment.
+_WEB_ORIGINS = [
+    o.strip() for o in _env_list("WEB_ORIGINS",
+                                 "http://localhost:3000,http://127.0.0.1:3000") if o.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_WEB_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["content-type", "accept"],
+)
+
 app.include_router(api.router)
 app.include_router(live_demo.router)
 if config.CONTROL_ENABLED:

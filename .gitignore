@@ -13,3 +13,6 @@ synthetic_cases.json
 *.db-wal
 graphify-out/
 docs/video-script.md
+# the Next.js console keeps its own ignore file
+web/node_modules/
+web/.next/
