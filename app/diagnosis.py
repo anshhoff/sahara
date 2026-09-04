@@ -69,14 +69,15 @@ def diagnose(case: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
         # guard that fires on irrelevant churn gets switched off within a week and
         # protects nothing; the value of this one is that it is quiet.
         snapshot = fencing.decision_fingerprint(cases.get(case["id"]) or case)
-        verdict = llm.classify(
-            {
-                "error_code": event.get("error_code"),
-                "error_reason": event.get("error_reason"),
-                "error_description": event.get("error_description"),
-                "error_step": event.get("error_step"),
-            }
-        )
+        with clock.timed("llm_classify", case["id"]):
+            verdict = llm.classify(
+                {
+                    "error_code": event.get("error_code"),
+                    "error_reason": event.get("error_reason"),
+                    "error_description": event.get("error_description"),
+                    "error_step": event.get("error_step"),
+                }
+            )
         fresh = fencing.inference_unchanged(cases.get(case["id"]) or case, snapshot, action="CLASSIFY")
         if fresh.blocks:
             # The classification was computed against a world that no longer exists.

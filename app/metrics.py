@@ -509,6 +509,284 @@ def incremental_recovery(bootstrap: int = 10000, seed: int = 42) -> dict[str, An
     }
 
 
+# --------------------------------------------------- 4.1 per-category lift
+def lift_by_category(bootstrap: int = 4000, seed: int = 42) -> list[dict[str, Any]]:
+    """Lift, with an interval, split by failure category — INCLUDING the categories
+    where the agent does nothing.
+
+    Publishing where it is flat is what makes the rest believable. A table in which
+    every row is a win is a table nobody should believe, and the rows below where the
+    interval spans zero are doing more work for the reader than the ones where it does
+    not.
+
+    Arm counts are shown on every row. Some categories carry twenty cases and the
+    interval says so; a per-category number quoted without its n is a number designed
+    to be misread.
+    """
+    rows = db.rows_to_dicts(db.query(
+        "SELECT COALESCE(current_category, 'unknown') AS category, status, is_holdout,"
+        " amount_at_risk_paise FROM recovery_case ORDER BY created_at"))
+    if not any(int(r["is_holdout"]) for r in rows):
+        return []
+
+    def rate(xs: list[dict[str, Any]]) -> float:
+        return sum(1 for x in xs if x["status"] == "recovered") / len(xs) if xs else 0.0
+
+    out: list[dict[str, Any]] = []
+    for category in config.CATEGORIES:
+        treated = [r for r in rows if r["category"] == category and not int(r["is_holdout"])]
+        control = [r for r in rows if r["category"] == category and int(r["is_holdout"])]
+        entry: dict[str, Any] = {
+            "category": category,
+            "treated": {"n": len(treated),
+                        "recovered": sum(1 for r in treated if r["status"] == "recovered"),
+                        "rate": round(rate(treated), 4)},
+            "control": {"n": len(control),
+                        "recovered": sum(1 for r in control if r["status"] == "recovered"),
+                        "rate": round(rate(control), 4)},
+        }
+        if not treated or not control:
+            # Not "no effect" — no measurement. Reported as unavailable, because a
+            # category with an empty arm has nothing to say and saying zero would be a
+            # claim it cannot support.
+            entry.update({"lift": None, "lift_ci95": None, "significant": None,
+                          "reason": "one arm is empty at this sample size"})
+            out.append(entry)
+            continue
+
+        lift = rate(treated) - rate(control)
+        rng = random.Random(seed)
+        diffs = []
+        for _ in range(bootstrap):
+            rt = [treated[rng.randrange(len(treated))] for _ in range(len(treated))]
+            rc = [control[rng.randrange(len(control))] for _ in range(len(control))]
+            diffs.append(rate(rt) - rate(rc))
+        diffs.sort()
+        lo = diffs[int(0.025 * len(diffs))]
+        hi = diffs[min(int(0.975 * len(diffs)), len(diffs) - 1)]
+        entry.update({
+            "lift": round(lift, 4),
+            "lift_ci95": [round(lo, 4), round(hi, 4)],
+            "significant": lo > 0 or hi < 0,
+        })
+        out.append(entry)
+    return out
+
+
+# ------------------------------------------------- 4.2 prior calibration
+def _realised_outcomes() -> list[dict[str, Any]]:
+    """One row per executed intervention on a CLOSED case: the prior that justified it,
+    and whether the money arrived after it.
+
+    The attribution rule is *last-touch*: an intervention scores 1 only if it was the
+    last thing done to the case AND the case recovered. Everything else scores 0 — an
+    intervention followed by another intervention demonstrably did not work, which is
+    exactly what the next one being necessary means.
+
+    **The first version of this scored only the last execution and threw the rest away.
+    That is a selection bias with a direction**: the last execution before a recovery is
+    by construction the one that worked, so every prior came back "pessimistic" with a
+    realised rate of 1.000. Keeping the successes and discarding the failures is not an
+    attribution rule, it is a way of proving whatever you like.
+
+    What last-touch still cannot do is split credit for a recovery across the three
+    interventions that preceded it. That needs a model of how they combine, and
+    inventing one would make this table an opinion — so the first two are scored 0 and
+    the rule is stated rather than hidden. It reads as slightly harsh on early attempts,
+    which is the safe direction for a table whose job is to catch over-confidence.
+    """
+    rows = db.rows_to_dicts(db.query(
+        "SELECT e.id AS execution_id, e.case_id AS case_id, e.action AS action,"
+        "       e.executed_at AS executed_at, d.attempt_number AS attempt,"
+        "       c.status AS status, c.current_category AS category"
+        " FROM execution_record e"
+        " JOIN intervention_decision d ON d.id = e.decision_id"
+        " JOIN recovery_case c ON c.id = e.case_id"
+        " WHERE c.status != 'open'"
+        " ORDER BY e.case_id, e.executed_at, e.rowid"))
+    last_execution: dict[str, str] = {}
+    for r in rows:
+        last_execution[r["case_id"]] = r["execution_id"]
+
+    out = []
+    for r in rows:
+        category = r["category"] or "unknown"
+        worked = (r["status"] == "recovered"
+                  and last_execution[r["case_id"]] == r["execution_id"])
+        out.append({
+            "execution_id": r["execution_id"],
+            "case_id": r["case_id"],
+            "category": category,
+            "action": r["action"],
+            "attempt": int(r["attempt"]),
+            "prior": _prior(category, r["action"], int(r["attempt"])),
+            "recovered": 1 if worked else 0,
+        })
+    return out
+
+
+def _prior(category: str, action: str, attempt: int) -> float:
+    row = config.P_RECOVER_PRIOR.get((category, action), config.P_RECOVER_DEFAULT)
+    return float(row[max(1, min(attempt, config.MAX_ATTEMPTS)) - 1])
+
+
+def prior_calibration(n_bins: int = 5) -> dict[str, Any]:
+    """Score `P_RECOVER_PRIOR` against what actually happened.
+
+    These priors drive every EV gate in the system — they decide which interventions
+    fire and which cases are handed to a person — and until now they had never been
+    checked against a single outcome. A number that decides where money goes and has
+    never been scored is an assumption wearing a measurement's clothes.
+
+    Brier score is mean squared error on the probabilities: 0 is perfect, 0.25 is what
+    you get by always saying 0.5, and lower is better. ECE is the average gap between
+    what the prior claimed and what happened, weighted by how often each bin came up —
+    Brier punishes confident errors, ECE says which direction the errors run.
+    """
+    rows = _realised_outcomes()
+    if not rows:
+        return {"available": False,
+                "reason": "no closed case has an executed intervention to score"}
+
+    brier = sum((r["prior"] - r["recovered"]) ** 2 for r in rows) / len(rows)
+
+    bins: list[dict[str, Any]] = []
+    ece = 0.0
+    for i in range(n_bins):
+        lo, hi = i / n_bins, (i + 1) / n_bins
+        members = [r for r in rows
+                   if (lo <= r["prior"] < hi) or (i == n_bins - 1 and r["prior"] == hi)]
+        if not members:
+            bins.append({"bin": f"[{lo:.1f}, {hi:.1f})", "n": 0,
+                         "mean_prior": None, "realised": None, "gap": None})
+            continue
+        mean_prior = sum(r["prior"] for r in members) / len(members)
+        realised = sum(r["recovered"] for r in members) / len(members)
+        ece += (len(members) / len(rows)) * abs(mean_prior - realised)
+        bins.append({
+            "bin": f"[{lo:.1f}, {hi:.1f})",
+            "n": len(members),
+            "mean_prior": round(mean_prior, 4),
+            "realised": round(realised, 4),
+            "gap": round(realised - mean_prior, 4),
+        })
+
+    pairs: list[dict[str, Any]] = []
+    keys = sorted({(r["category"], r["action"]) for r in rows})
+    for category, action in keys:
+        members = [r for r in rows if r["category"] == category and r["action"] == action]
+        mean_prior = sum(r["prior"] for r in members) / len(members)
+        realised = sum(r["recovered"] for r in members) / len(members)
+        pairs.append({
+            "category": category,
+            "action": action,
+            "n": len(members),
+            "prior": round(mean_prior, 4),
+            "realised": round(realised, 4),
+            "gap": round(realised - mean_prior, 4),
+            "direction": ("optimistic" if mean_prior > realised else
+                          "pessimistic" if mean_prior < realised else "exact"),
+        })
+    pairs.sort(key=lambda p: -abs(p["gap"]))
+
+    return {
+        "available": True,
+        "n_scored": len(rows),
+        "n_executions_total": int(db.scalar("SELECT COUNT(*) FROM execution_record", (), 0)),
+        "brier_score": round(brier, 4),
+        "ece": round(ece, 4),
+        "reliability": bins,
+        "by_pair": pairs,
+        "attribution": ("last-touch: an intervention scores 1 only if it was the last thing "
+                        "done to the case AND the case recovered. An intervention followed by "
+                        "another one demonstrably did not work. Credit cannot be split across "
+                        "a sequence without a model of how they combine, so early attempts in "
+                        "a recovered sequence score 0 — harsh, and the safe direction for a "
+                        "table whose job is to catch over-confidence. Scoring only the last "
+                        "execution instead would keep every success and discard every failure, "
+                        "which is not an attribution rule."),
+        "reference": ("Brier 0.25 is what always answering 0.5 scores; the base rate's own "
+                      "Brier is the number to beat, not zero"),
+    }
+
+
+# ---------------------------------------------- 4.3 what the agent declined to do
+# Terminal states in which the agent deliberately did NOT contact the customer, and
+# the reason for each. This is promoted out of stopped_by_status() and into the
+# headline because it is the strongest thing this system has to say: what it declined
+# to do is a harder claim than what it achieved, and nothing else in the field reports
+# it at all.
+_DECLINED_REASONS: dict[str, str] = {
+    "stopped_opt_out": "the customer had opted out (I3)",
+    "stopped_suppressed": "the customer is on the suppression list (I6)",
+    "stopped_unknown": "the failure cause was unknown and the agent does not guess (I4)",
+    "stopped_uneconomic": "the contact would have cost more than it was likely to return (E1)",
+    "stopped_already_settled": "the money had already arrived between deciding and acting (fencing)",
+    "stopped_unverified_recipient": "the destination was not on the verified allowlist (I8)",
+    "stopped_holdout": "the case was assigned to the control arm and deliberately never worked",
+}
+
+
+def declined_to_contact() -> dict[str, Any]:
+    """Cases the agent deliberately did not contact, with the reason for each."""
+    by_status = stopped_by_status()
+    rows = [{"status": status, "n": by_status.get(status, 0), "why": why}
+            for status, why in _DECLINED_REASONS.items()]
+    # The control arm is separated out: those cases were withheld to measure the rest,
+    # not because a rule said no. Folding them in would inflate the restraint figure
+    # with an experimental design choice.
+    guarded = [r for r in rows if r["status"] != "stopped_holdout"]
+    return {
+        "n_declined": sum(r["n"] for r in guarded),
+        "n_control_arm": by_status.get("stopped_holdout", 0),
+        "by_reason": rows,
+        "case_ids": _ids(
+            "SELECT id FROM recovery_case WHERE status IN "
+            "('stopped_opt_out','stopped_suppressed','stopped_unknown','stopped_uneconomic',"
+            " 'stopped_already_settled','stopped_unverified_recipient') ORDER BY created_at"),
+        "note": ("cases the agent could have messaged and chose not to. The control arm is "
+                 "counted separately: those were withheld to measure the rest, not refused "
+                 "by a rule."),
+    }
+
+
+# ------------------------------------------------------------ 4.5 stage latency
+def stage_latency() -> dict[str, Any]:
+    """Wall-clock p50/p95 per pipeline stage, in milliseconds.
+
+    Wall clock, deliberately, even on a batch running against a simulated clock: the
+    simulated clock measures the modelled world's calendar and this measures how long
+    our code took, and reporting one as the other would be nonsense in both directions.
+    """
+    rows = db.query(
+        "SELECT stage, COUNT(*) AS n, AVG(duration_ms) AS mean FROM stage_timing GROUP BY stage")
+    out: dict[str, Any] = {}
+    for r in rows:
+        values = sorted(float(x["duration_ms"]) for x in db.query(
+            "SELECT duration_ms FROM stage_timing WHERE stage = ?", (r["stage"],)))
+        if not values:
+            continue
+
+        def pct(q: float) -> float:
+            # Nearest-rank. With a handful of samples an interpolating percentile
+            # invents a duration nothing actually took.
+            return round(values[min(len(values) - 1, max(0, int(round(q * len(values))) - 1))], 3)
+
+        out[r["stage"]] = {
+            "n": int(r["n"]),
+            "p50_ms": pct(0.50),
+            "p95_ms": pct(0.95),
+            "max_ms": round(values[-1], 3),
+            "mean_ms": round(float(r["mean"]), 3),
+        }
+    return {
+        "by_stage": out,
+        "basis": ("wall clock, in milliseconds, even under a simulated clock — the simulated "
+                  "clock measures the modelled world's calendar, this measures how long the "
+                  "code took, and reporting either as the other would be nonsense"),
+    }
+
+
 def summary() -> dict[str, Any]:
     at_risk_paise, _ = at_risk()
     recovered_paise, _ = recovered()
@@ -534,6 +812,10 @@ def summary() -> dict[str, Any]:
         "promises": promises(),
         "reconciliation": reconciliation(),
         "incremental": incremental_recovery(),
+        "lift_by_category": lift_by_category(),
+        "calibration": prior_calibration(),
+        "declined_to_contact": declined_to_contact(),
+        "latency": stage_latency(),
         "fencing": fencing.fence_stats(),
         "costs": costs(),
         "net": net_recovery(),

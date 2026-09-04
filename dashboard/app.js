@@ -333,6 +333,87 @@ function renderImpact() {
     '<div class="panel-head"><h2>Treated vs control</h2><span class="spacer"></span>' +
       '<span class="muted">randomised at intake, assignment travels with the event</span></div>' +
     '<div class="panel-body">' + armsHtml(inc, false) + netHtml() + "</div>";
+  renderLiftByCategory();
+  renderCalibration();
+  renderDeclined();
+}
+
+/* Lift per cause, with its interval and its arm counts. A row whose interval spans
+   zero is shown as spanning zero rather than quietly rounded into a win. */
+function renderLiftByCategory() {
+  const rows = (state.summary && state.summary.lift_by_category) || [];
+  const host = $("#lift-by-category");
+  if (!host) return;
+  const shown = rows.filter((r) => r.treated.n || r.control.n);
+  if (!shown.length) {
+    host.innerHTML = '<div class="empty">No control arm in this run.</div>';
+    return;
+  }
+  host.innerHTML =
+    '<table class="grid"><thead><tr><th>Cause</th><th class="num">Treated</th>' +
+    '<th class="num">Control</th><th class="num">Lift</th><th>95% CI</th></tr></thead><tbody>' +
+    shown.map(function (r) {
+      const arms = '<td class="num">' + r.treated.recovered + "/" + r.treated.n + "</td>" +
+                   '<td class="num">' + r.control.recovered + "/" + r.control.n + "</td>";
+      if (r.lift === null) {
+        return "<tr><th>" + esc(words(r.category)) + "</th>" + arms +
+          '<td class="num dim">—</td><td class="dim">' + esc(r.reason || "") + "</td></tr>";
+      }
+      const ci = r.lift_ci95 || [0, 0];
+      return "<tr><th>" + esc(words(r.category)) + "</th>" + arms +
+        '<td class="num">' + (r.lift >= 0 ? "+" : "") + (100 * r.lift).toFixed(1) + "pp</td>" +
+        "<td>[" + (100 * ci[0]).toFixed(1) + ", " + (100 * ci[1]).toFixed(1) + "]" +
+        (r.significant ? "" : ' <span class="badge warn">spans zero</span>') + "</td></tr>";
+    }).join("") + "</tbody></table>";
+}
+
+/* Brier, ECE and the per-pair gap. The direction column is the useful one: Brier
+   punishes confident errors, the gap says which way they run. */
+function renderCalibration() {
+  const cal = (state.summary && state.summary.calibration) || {};
+  const host = $("#calibration");
+  if (!host) return;
+  if (!cal.available) {
+    host.innerHTML = '<div class="empty">' + esc(cal.reason || "Nothing to score yet.") + "</div>";
+    $("#calibration-head").textContent = "";
+    return;
+  }
+  $("#calibration-head").textContent =
+    "Brier " + cal.brier_score.toFixed(4) + " · ECE " + cal.ece.toFixed(4) +
+    " · " + cal.n_scored + " executions scored";
+  host.innerHTML =
+    '<table class="grid"><thead><tr><th>Cause / action</th><th class="num">n</th>' +
+    '<th class="num">prior said</th><th class="num">realised</th><th class="num">gap</th>' +
+    "<th>direction</th></tr></thead><tbody>" +
+    cal.by_pair.map(function (p) {
+      return "<tr><th>" + esc(words(p.category)) + " / " + esc(words(p.action)) + "</th>" +
+        '<td class="num">' + p.n + "</td>" +
+        '<td class="num">' + p.prior.toFixed(3) + "</td>" +
+        '<td class="num">' + p.realised.toFixed(3) + "</td>" +
+        '<td class="num">' + (p.gap >= 0 ? "+" : "") + p.gap.toFixed(3) + "</td>" +
+        '<td><span class="badge ' + (p.direction === "optimistic" ? "warn" : "") + '">' +
+          esc(p.direction) + "</span></td></tr>";
+    }).join("") + "</tbody></table>" +
+    '<p class="foot-note">' + esc(cal.attribution) + "</p>";
+}
+
+/* What it declined to do — promoted out of the stop-status breakdown, because it is
+   the strongest thing this system has to say. */
+function renderDeclined() {
+  const d = (state.summary && state.summary.declined_to_contact) || {};
+  const host = $("#declined");
+  if (!host) return;
+  if (!d.by_reason) { host.innerHTML = ""; return; }
+  $("#declined-head").textContent =
+    d.n_declined + " cases · " + d.n_control_arm + " more held out to measure the rest";
+  const rows = d.by_reason.filter(function (r) { return r.n && r.status !== "stopped_holdout"; });
+  host.innerHTML = rows.length
+    ? '<table class="grid"><thead><tr><th class="num">Cases</th><th>Why the agent said no</th>' +
+      "</tr></thead><tbody>" + rows.map(function (r) {
+        return '<tr><td class="num">' + r.n + "</td><td>" + esc(r.why) + "</td></tr>";
+      }).join("") + "</tbody></table>" +
+      '<p class="foot-note">' + esc(d.note) + "</p>"
+    : '<div class="empty">This batch produced no refusals.</div>';
 }
 
 /* The number the project actually stands behind: money that came back BECAUSE of the

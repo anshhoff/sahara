@@ -617,6 +617,7 @@ def classification_accuracy(runner: Runner) -> dict[str, Any]:
     the rule path and the model path (docs/05 §7)."""
     buckets = {"rule": {"n": 0, "correct": 0}, "llm": {"n": 0, "correct": 0}}
     misses: list[str] = []
+    pairs: list[tuple[str, str]] = []      # (ground truth, what we predicted)
     for sub_id, entry in runner.profiles.items():
         case = case_store.find_latest_by_subscription(sub_id)
         if case is None:
@@ -631,6 +632,7 @@ def classification_accuracy(runner: Runner) -> dict[str, Any]:
         # A case the rules could not reach belongs to the model path even when there
         # is no model configured — otherwise LLM_PROVIDER=none would flatter the rules.
         path = "llm" if (row["method"] == "llm" or row["matched_rule"] == "R7-no-llm") else "rule"
+        pairs.append((truth, row["category"]))
         bucket = buckets[path]
         bucket["n"] += 1
         if row["category"] == truth:
@@ -639,7 +641,42 @@ def classification_accuracy(runner: Runner) -> dict[str, Any]:
             misses.append(f"{entry['synthetic_case_ref']}: truth={truth} got={row['category']} ({path})")
     for b in buckets.values():
         b["accuracy"] = round(b["correct"] / b["n"], 4) if b["n"] else None
-    return {"by_method": buckets, "misses": misses}
+    return {"by_method": buckets, "misses": misses,
+            "by_category": _classification_by_category(pairs)}
+
+
+def _classification_by_category(pairs: list[tuple[str, str]]) -> list[dict[str, Any]]:
+    """Precision, recall and F1 per category, with support.
+
+    "100% (84/84)" is a scalar, and a perfect scalar is the least informative number a
+    classifier can report — it hides which categories carry two cases and which carry
+    two hundred, and it cannot show where the errors go. A table with texture reads as
+    more credible because it IS more credible: every cell is falsifiable on its own.
+
+    Support is printed next to every score. A recall of 1.00 over three cases and a
+    recall of 1.00 over four hundred are the same number and not the same claim.
+    """
+    out: list[dict[str, Any]] = []
+    for category in config.CATEGORIES:
+        tp = sum(1 for truth, got in pairs if truth == category and got == category)
+        fp = sum(1 for truth, got in pairs if truth != category and got == category)
+        fn = sum(1 for truth, got in pairs if truth == category and got != category)
+        support = tp + fn
+        precision = tp / (tp + fp) if (tp + fp) else None
+        recall = tp / support if support else None
+        f1 = (2 * precision * recall / (precision + recall)
+              if precision and recall and (precision + recall) else
+              0.0 if (precision is not None and recall is not None) else None)
+        out.append({
+            "category": category,
+            "support": support,
+            "predicted": tp + fp,
+            "tp": tp, "fp": fp, "fn": fn,
+            "precision": None if precision is None else round(precision, 4),
+            "recall": None if recall is None else round(recall, 4),
+            "f1": None if f1 is None else round(f1, 4),
+        })
+    return out
 
 
 def print_summary(runner: Runner, accuracy: dict[str, Any]) -> None:
@@ -707,6 +744,62 @@ def print_summary(runner: Runner, accuracy: dict[str, Any]) -> None:
         b = acc[method]
         pct = "-" if b["accuracy"] is None else f"{b['accuracy'] * 100:.1f}%"
         print(f"  classification accuracy ({method}): {pct}  ({b['correct']}/{b['n']})")
+
+    rows = accuracy.get("by_category") or []
+    if rows:
+        print("\n  CLASSIFICATION BY CATEGORY  (support = how many cases truly are this)")
+        print(f"    {'category':24s} {'support':>7s} {'prec':>7s} {'recall':>7s} {'F1':>7s}"
+              f" {'fp':>4s} {'fn':>4s}")
+        for r in rows:
+            def _f(x: Any) -> str:
+                return "  -  " if x is None else f"{x:.3f}"
+            print(f"    {r['category']:24s} {r['support']:>7d} {_f(r['precision']):>7s}"
+                  f" {_f(r['recall']):>7s} {_f(r['f1']):>7s} {r['fp']:>4d} {r['fn']:>4d}")
+
+    lifts = [r for r in (s.get("lift_by_category") or []) if r["treated"]["n"] or r["control"]["n"]]
+    if lifts:
+        print("\n  LIFT BY CATEGORY  (published including where the agent is flat —")
+        print("                     a table where every row is a win is one nobody should believe)")
+        print(f"    {'category':24s} {'treated':>13s} {'control':>13s} {'lift':>9s}   95% CI")
+        for r in lifts:
+            t, c = r["treated"], r["control"]
+            if r["lift"] is None:
+                print(f"    {r['category']:24s} {t['recovered']:>5d}/{t['n']:<7d}"
+                      f" {c['recovered']:>5d}/{c['n']:<7d} {'—':>9s}   {r.get('reason', '')}")
+                continue
+            lo, hi = r["lift_ci95"]
+            mark = "" if r["significant"] else "   (spans zero)"
+            print(f"    {r['category']:24s} {t['recovered']:>5d}/{t['n']:<7d}"
+                  f" {c['recovered']:>5d}/{c['n']:<7d} {r['lift'] * 100:>+8.1f}pp"
+                  f"   [{lo * 100:+.1f}, {hi * 100:+.1f}]{mark}")
+
+    cal = s.get("calibration") or {}
+    if cal.get("available"):
+        print(f"\n  PRIOR CALIBRATION  (Brier {cal['brier_score']:.4f}, ECE {cal['ece']:.4f}, "
+              f"{cal['n_scored']} of {cal['n_executions_total']} executions scored)")
+        print("                     these priors drive every EV gate and had never been")
+        print("                     checked against a single realised outcome")
+        print(f"    {'category / action':44s} {'n':>4s} {'prior':>7s} {'realised':>9s} {'gap':>8s}")
+        for pair in cal["by_pair"][:12]:
+            label = f"{pair['category']} / {pair['action']}"
+            print(f"    {label:44s} {pair['n']:>4d} {pair['prior']:>7.3f}"
+                  f" {pair['realised']:>9.3f} {pair['gap']:>+8.3f}  {pair['direction']}")
+
+    dec = s.get("declined_to_contact") or {}
+    if dec:
+        print(f"\n  DELIBERATELY NOT CONTACTED: {dec['n_declined']} cases"
+              f"   (+ {dec['n_control_arm']} held out to measure the rest)")
+        for r in dec["by_reason"]:
+            if r["n"] and r["status"] != "stopped_holdout":
+                print(f"    {r['n']:>5d}  {r['why']}")
+
+    lat = (s.get("latency") or {}).get("by_stage") or {}
+    if lat:
+        print("\n  STAGE LATENCY (wall clock, ms — not the simulated clock)")
+        print(f"    {'stage':16s} {'n':>7s} {'p50':>9s} {'p95':>9s} {'max':>9s}")
+        for stage, v in lat.items():
+            print(f"    {stage:16s} {v['n']:>7d} {v['p50_ms']:>9.2f} {v['p95_ms']:>9.2f}"
+                  f" {v['max_ms']:>9.2f}")
     inc = s.get("incremental") or {}
     if inc.get("available"):
         t, c = inc["treated"], inc["control"]

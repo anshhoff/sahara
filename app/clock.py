@@ -6,10 +6,17 @@ clock that fast-forwards a 14-day recovery episode in milliseconds).
 """
 from __future__ import annotations
 
+import logging
+# `time` the class is already imported from datetime below, so the module is aliased.
+# Naming this `_time` rather than renaming the datetime import keeps every existing
+# `time(...)` call in this file meaning what it has always meant.
+import time as _time
 from datetime import datetime, time, timedelta, timezone
 from typing import Optional
 
 from app import config
+
+log = logging.getLogger(__name__)
 
 
 class Clock:
@@ -43,6 +50,48 @@ class SimulatedClock(Clock):
 
 
 _clock: Clock = Clock()
+
+
+class timed:
+    """Time one pipeline stage on the WALL clock and record it.
+
+    A context manager rather than a decorator so it can wrap part of a function — the
+    interesting stage boundaries here are not function boundaries. `time.perf_counter`
+    rather than the simulated clock, always: a batch replay advances its clock by hours
+    at a time, and asking it how long a database write took would answer "3600 seconds".
+
+    Never raises and never swallows: a failure inside the recording is logged and
+    dropped, the stage's own exception propagates, and the row is still written with
+    ok = 0 so a stage that reliably fails does not simply vanish from the percentiles.
+    """
+
+    __slots__ = ("stage", "case_id", "_t0")
+
+    def __init__(self, stage: str, case_id: Optional[str] = None):
+        self.stage = stage
+        self.case_id = case_id
+        self._t0 = 0.0
+
+    def __enter__(self) -> "timed":
+        self._t0 = _time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        elapsed_ms = (_time.perf_counter() - self._t0) * 1000.0
+        try:
+            from app import db
+
+            db.insert("stage_timing", {
+                "stage": self.stage,
+                "case_id": self.case_id,
+                "duration_ms": elapsed_ms,
+                "ok": 0 if exc_type is not None else 1,
+                "recorded_at": now_iso(),
+                "synthetic": 1 if is_simulated() else 0,
+            })
+        except Exception:  # pragma: no cover - telemetry must never break the pipeline
+            log.debug("stage timing for %s could not be recorded", self.stage, exc_info=True)
+        return False
 
 
 def get_clock() -> Clock:

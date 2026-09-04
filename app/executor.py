@@ -499,7 +499,8 @@ def execute_decision(decision: dict[str, Any]) -> Optional[dict[str, Any]]:
         return None
 
     try:
-        result = handler(case)
+        with clock.timed("execute", case["id"]):
+            result = handler(case)
     except Exception as exc:
         log.exception("execution failed for decision %s", decision["id"])
         result = {

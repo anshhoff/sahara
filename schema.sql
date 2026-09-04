@@ -174,6 +174,27 @@ CREATE TABLE IF NOT EXISTS suppression (
   created_at TEXT NOT NULL
 );
 
+-- ---------------------------------------------------------------- StageTiming
+-- WALL-CLOCK duration of one pipeline stage, in milliseconds.
+--
+-- Wall clock even when the batch is running against a simulated clock, and the two
+-- must never be confused: the simulated clock measures the modelled world's calendar
+-- (a case that took nine days to recover), this measures how long our code took (a
+-- diagnosis that took four milliseconds). Reporting either as the other would be
+-- nonsense in both directions.
+--
+-- No case_id foreign key: a stage can be timed before a case exists — intake is one —
+-- and a timing row is diagnostic, never evidence about a case.
+CREATE TABLE IF NOT EXISTS stage_timing (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  stage TEXT NOT NULL,
+  case_id TEXT,
+  duration_ms REAL NOT NULL,
+  ok INTEGER NOT NULL DEFAULT 1 CHECK (ok IN (0,1)),
+  recorded_at TEXT NOT NULL,
+  synthetic INTEGER NOT NULL DEFAULT 0 CHECK (synthetic IN (0,1))
+);
+
 -- --------------------------------------------------------------------- Promise
 -- A date the customer ACTUALLY NAMED, not a window we imposed.
 --
@@ -252,5 +273,6 @@ CREATE INDEX IF NOT EXISTS idx_execution_executed_at ON execution_record(execute
 CREATE INDEX IF NOT EXISTS idx_case_customer ON recovery_case(customer_id);
 CREATE INDEX IF NOT EXISTS idx_fence_case ON dispatch_fence(case_id, phase);
 CREATE INDEX IF NOT EXISTS idx_promise_case ON promise(case_id);
+CREATE INDEX IF NOT EXISTS idx_timing_stage ON stage_timing(stage);
 CREATE INDEX IF NOT EXISTS idx_promise_due ON promise(status, due_at);
 CREATE INDEX IF NOT EXISTS idx_event_settlement ON failure_event(subscription_id, event_type, received_at);

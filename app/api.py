@@ -282,6 +282,35 @@ def get_case(case_id: str) -> dict[str, Any]:
     }
 
 
+@router.get("/lift-by-category")
+def lift_by_category() -> list[dict[str, Any]]:
+    """Lift with a confidence interval, split by failure cause — including the
+    categories where the agent does nothing. A table in which every row is a win is a
+    table nobody should believe."""
+    return metrics.lift_by_category()
+
+
+@router.get("/calibration")
+def calibration() -> dict[str, Any]:
+    """`P_RECOVER_PRIOR` scored against what actually happened: Brier, ECE, a
+    reliability table and a per-(category, action) gap. These priors drive every EV
+    gate in the system and had never been checked against a single realised outcome."""
+    return metrics.prior_calibration()
+
+
+@router.get("/declined")
+def declined() -> dict[str, Any]:
+    """Cases the agent could have messaged and deliberately did not, with the reason
+    for each. What it declined to do is a harder claim than what it achieved."""
+    return metrics.declined_to_contact()
+
+
+@router.get("/latency")
+def latency() -> dict[str, Any]:
+    """Wall-clock p50/p95 per pipeline stage."""
+    return metrics.stage_latency()
+
+
 @router.get("/promises")
 def promise_stats() -> dict[str, Any]:
     """Dated promises the customer actually made, and whether they held."""
