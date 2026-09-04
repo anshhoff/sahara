@@ -28,55 +28,84 @@ webhook ─▶ DETECT ─▶ DIAGNOSE ─▶ [STOP GATE] ─▶ DECIDE ─▶ [S
                                                    gate
 ```
 
-## Results (89 cases: 88 synthetic [seed 42] + 1 live test-mode)
+## Results (88 synthetic cases, seed 42)
 
 The headline is **incremental, net of cost** — not gross. A randomised control arm is
-detected and diagnosed like every other case and then never intervened on, so the
-agent is credited only with recovery that would not have happened anyway; every rupee
-it spent getting there is then subtracted.
+detected and diagnosed like every other case and then never intervened on, so the agent
+is credited only with recovery that would not have happened anyway; every rupee it spent
+getting there is then subtracted.
+
+<!-- BEGIN RESULTS — verified by scripts/verify_numbers.py; editing a digit here turns CI red -->
 
 | Metric | Value |
 |---|---|
-| ₹ at risk | ₹72,412 across the 88 synthetic cases (+ ₹499 live, still open) |
-| **Incremental recovery, net of cost** | **₹7,762** — 95% CI [−₹9,473, +₹20,460] |
-| Incremental recovery, gross | ₹9,042 of the ₹18,567 gross recovered in the treated arm |
-| **Recovery rate, treated vs control** | **63.5% (33/52) vs 16.7% (6/36)** |
-| **Lift** | **+46.8 pp**, 95% CI **[+28.8, +63.9] pp** — excludes zero |
-| Total cost | ₹1,280 = ₹480 outreach (40 contacts) + ₹800 human queue (20 cases) |
-| Cost per ₹100 recovered | ₹5.09 |
-| Gross ₹ recovered | ₹25,161 (39 of 88 cases) |
-| Avg time to recovery | 64.2 h (simulated clock) |
-| Audit chain | intact — 511 entries, 0 unchained (`GET /api/audit/verify`) |
-| Classification accuracy vs ground truth | 100% (84/84) rules path · 25% (1/4) model path, with **no model configured** |
+| ₹ at risk | ₹72,412 across 88 cases |
+| **Net incremental recovery** | **₹12,921** — 95% CI [₹5,640, ₹20,822] ✅ excludes zero |
+| **Lift, treated vs control** | **+49.8 pp**, 95% CI **[+31.0, +66.9] pp** ✅ excludes zero |
+| Recovery rate by arm | **69.2% (36/52)** treated · **19.4% (7/36)** control |
+| Incremental recovery, gross | ₹14,330 of the ₹21,157 gross recovered in the treated arm |
+| Total cost | ₹1,409 = ₹729 outreach (51 contacts) + ₹680 human queue (17 cases) |
+| Gross ₹ recovered | ₹21,157 (43 of 88 cases, 48.9%) |
+| Cost per ₹100 recovered | ₹6.66 |
+| **Cases deliberately not contacted** | **9** — plus 27 held out to measure the rest |
+| **Outreach to already-settled customers** | **0 of 51 dispatches fenced** |
+| Escalation ladder | 30 silent retries · 38 links · 4 promises · **9 voice calls** |
+| Dated promises the customer named | 4 — 2 kept, 2 broken |
+| Prior calibration | Brier **0.2581**, ECE **0.1064**, 81 of 81 executions scored |
+| Audit chain | intact — 545 entries, 0 unchained (`GET /api/audit/verify`) |
+| Classification accuracy vs ground truth | 100% (84/84) rules path · 25% (1/4) model path, **with no model configured** |
+| Acceptance checks | 20 of 20 pass · 241 tests green |
+
+<!-- END RESULTS -->
+
+Two more results, from runs of their own:
+
+| Claim | Value |
+|---|---|
+| **What the voice rung is worth** (n=2,010) | **+7.4 pp**, 95% CI **[+2.2, +12.5] pp** ✅ excludes zero |
+| The same rung, in rupees | ₹+49,519, 95% CI [−₹66,790, +₹168,596] ❌ **includes zero** |
+| **Model vs keyword rules** at reading a Hinglish promise | **90.0% vs 60.0%** on policy facts, McNemar **p = 0.0117** |
+
+> **The rate lift is a result. The rupee figure is not one yet**, and quoting the first
+> while the second spans zero is forbidden by [the analysis plan](docs/analysis-plan.md).
+> Ticket sizes span ₹199 to ₹4,999, so a per-case money estimate needs far more cases
+> before it settles.
 
 Reproduce, with no accounts, no API keys and no model download:
 
 ```bash
 python scripts/generate_synthetic.py --n 80 --seed 42 --out synthetic_cases.json
-LLM_PROVIDER=none python scripts/run_batch.py --cases synthetic_cases.json --db recovery.db --holdout 0.35
+LLM_PROVIDER=none python scripts/run_batch.py --cases synthetic_cases.json --db recovery.db \
+    --seed 42 --holdout 0.35
 ```
 
-That reproduces the 88 synthetic rows exactly, including the arm assignment. It does
-**not** reproduce the 89th — the live case needs a Razorpay test key and the webhook
-secret (see "The one live case"). `/api/summary` always reports the split as
-`n_synthetic` / `n_live`, and gives both a synthetic-denominator `rate` and an
-all-cases `strict_rate`, so the two are never silently blended.
+**Then check that this table has not drifted from the code:**
+
+```bash
+python scripts/verify_numbers.py --check
+```
+
+That re-runs the batch from the seed in a throwaway database, extracts all 118 published
+values, and byte-compares them against `docs/verified-numbers.json`. Editing a digit in
+the table above makes it — and CI — exit non-zero. See [VERIFY.md](VERIFY.md) for every
+claim mapped to the artifact that proves it, and [THREAT-MODEL.md](THREAT-MODEL.md) for
+what this system structurally cannot do.
 
 Trace any number: `GET /api/metrics/trace/recovered` returns the exact case IDs behind
 it, and each of those IDs drills down to an `outcome` entry in its audit trail. Verify
-that the trail has not been edited since: `GET /api/audit/verify`.
+the trail has not been edited since: `GET /api/audit/verify`.
 
 ### Where every case ended
 
 | Terminal state | n |
 |---|---|
-| recovered | 39 |
-| stopped_holdout (control arm, observed for the full window) | 28 |
-| stopped_handoff (policy stop / lapsed promise) | 12 |
-| stopped_unknown | 8 |
+| recovered | 43 |
+| stopped_holdout (control arm, observed for the full window) | 27 |
+| stopped_handoff (policy stop, lapsed promise, or a broken promise-to-pay) | 9 |
+| stopped_unknown (I4 — the cause could not be diagnosed and the agent does not guess) | 8 |
 | stopped_opt_out | 1 |
-| stopped_max_attempts · stopped_cooldown_expired · stopped_suppressed · stopped_uneconomic | 0 each |
-| still open | 1 — the live case, awaiting its 24 h retry |
+| stopped_max_attempts · stopped_cooldown_expired · stopped_suppressed · stopped_uneconomic · stopped_already_settled · stopped_unverified_recipient | 0 each |
+| still open | 0 |
 
 Reading the table honestly:
 
@@ -94,16 +123,25 @@ Reading the table honestly:
   table takes; `tests/test_invariants.py` drives a case to the cap directly and asserts
   I1 fires. `SYNTH-E-03` is the batch's version of the same story: exactly 3 attempts,
   then a stop, and a fourth attempt is impossible.
-- **`stopped_uneconomic` is 0 for the same reason, and the number is worth more than a
-  non-zero one would be.** Every action the policy table chose also cleared its own
-  economics — which is a result about the policy table, not a gate that failed to run.
-  The margins are thin where they should be: a second reminder clears its costs by ₹7
-  on a ₹199 subscription and by ₹487 on a ₹4,999 one.
-  `tests/test_economics.py` drives a case the gate does stop.
-- **The 12 handed-off cases are a deliverable, not a failure.** Each one has a complete
-  case file at `GET /api/cases/{id}` — that response *is* the handoff artifact — and
-  each is charged ₹40 of human queue time in the cost table above, so handing a hard
-  case to a person is never free.
+- **`stopped_uneconomic` is 0, and it is a different 0 than it used to be.** The EV
+  gate now prices each action against **what the case would do instead** rather than
+  against zero — at the final rung that is the ₹40 human queue, not abandonment. A
+  refusal there therefore closes as `stopped_handoff`, because taking the ₹40 out of
+  the comparison *after* using it to win the comparison would quietly abandon a case
+  the arithmetic said was worth a person. Before that fix the gate refused every voice
+  call ever proposed. `tests/test_economics.py` drives a case the gate does stop.
+- **The 17 cases in the human queue are a deliverable, not a failure.** Each has a
+  complete case file at `GET /api/cases/{id}` — that response *is* the handoff artifact,
+  and `/queue` in the Next.js console is the screen for it — and each is charged ₹40 of
+  human queue time in the cost table above, so handing a hard case to a person is never
+  free. 8 of those 17 are `stopped_unknown`: the agent refused to guess a cause it could
+  not diagnose, which is both the correct behaviour and exactly the case a person is
+  better at than a rule table.
+- **Voice fired 9 times and never dialled anybody.** Every call is composed, priced,
+  gated by I1–I8 and recorded as `simulated`. The mode that would mean a real
+  transmission, `plivo_trial_verified`, reads 0 in every run because it is 0 — and a
+  synthetic customer has no phone number anywhere in this system, so I8 cannot be
+  satisfied by one. See [THREAT-MODEL.md](THREAT-MODEL.md).
 - **Outcome probabilities are modelling assumptions, not measured industry data**
   (`scripts/run_batch.py`, `SUCCESS_PROBABILITY` and `BASELINE_RECOVERY_PROBABILITY`).
   So are the costs and the agent's own priors (`app/config.py`). The measured thing
@@ -546,13 +584,58 @@ written first, as the claim token, and a lost race is answered as a duplicate wi
 - Every simulated message carries the literal `[SYNTHETIC DEMO]` disclosure, and the
   copy validator rejects any draft without it. Nothing is ever transmitted anywhere.
 
+## Deploying it
+
+```bash
+docker build -t sahara .
+docker run -p 8000:8000 sahara
+```
+
+The image bakes the batch in **at build time** rather than replaying it at boot: a
+container that simulates 88 cases on startup is one whose first request waits on a
+simulation, and whose numbers drift from the README if anything in the environment does.
+Running it during the build means the image either contains a batch whose acceptance
+checks all passed, or **the build fails** — `run_batch.py` exits non-zero, and that
+stops the build.
+
+It boots as a **public demo**, which means two things:
+
+1. **Every write route returns 404** — not 403. A 403 announces there is an endpoint
+   here and you may not use it, which is an invitation to hunt for the misconfigured
+   one. A 404 says there is nothing here, which in demo mode is true.
+2. **Boot refuses if any provider credential is present.** `assert_demo_safe()` runs
+   before the database is even opened and exits the process. A demo that can be handed
+   a Razorpay key and start moving money by env var is not fail-closed; it is
+   fail-closed-until-somebody-changes-their-mind.
+
+That second rule is a code path rather than a Dockerfile line on purpose: a container is
+a deployment detail, and the bounds of the agent are source code.
+
+### The Next.js console
+
+```bash
+uvicorn app.main:app --reload      # the API on :8000
+cd web && npm run dev              # the console on :3000
+```
+
+App Router, TypeScript, Tailwind. Every read path is a **server component**; the control
+room is the single client component, because polling a running job is the only thing here
+that needs a browser. The API client is generated from the FastAPI OpenAPI schema, so a
+renamed route breaks the build instead of a page.
+
+Three screens exist here that the vanilla dashboard never had: `/queue` (the ₹40 handoff
+queue), `/cases/[id]` (the voice-and-promise timeline) and `/fencing` (the compensation
+log). The vanilla dashboard at `/` still ships and still works — it is deleted only once
+every one of its nine sections has an equivalent, and until then both are maintained.
+See [`web/README.md`](web/README.md).
+
 ## Documentation
 
 This README is the operator's guide — setup, the three LLM modes, live mode, and how to
 verify every number are all above. Beyond it, the project documents itself in the places
 that cannot drift away from the code:
 
-- **`tests/`** — 133 tests are the executable specification. `test_policy_matrix.py`
+- **`tests/`** — 241 tests are the executable specification. `test_policy_matrix.py`
   iterates all 6×3 cells of the decision table; `test_invariants.py` drives a case to the
   attempt cap and asserts I1 fires; `test_copy_validation.py` is the copy validator's
   contract, rule by rule; `test_llm_boundary.py` pins the model's blast radius;

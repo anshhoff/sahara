@@ -1,6 +1,6 @@
 # 15 · Testing
 
-**133 tests across 14 files.** They are the executable specification: where these docs
+**241 tests across 18 files.** They are the executable specification: where these docs
 describe intent, `tests/` describes behaviour, and behaviour wins.
 
 ```bash
@@ -62,7 +62,7 @@ Two of those deserve their reasons stated:
 
 ## 3. What each file pins
 
-### `test_diagnosis_rules.py` — 6
+### `test_diagnosis_rules.py` — 16
 Parametrised over the rule table; R7's short-circuit; **"OTP expired" resolves to
 authentication, not card_expired**; unmatched text falls through to the model; every rule
 maps into the fixed enum; **table order decides an ambiguous string** — the test that stops
@@ -156,6 +156,68 @@ Summary exposes the synthetic split and the bounds; categories; case-list filter
 case file contains the whole story; an unknown case is 404; **the trace endpoint
 round-trips to case files**; the opt-out helper marks the customer and audits it.
 
+---
+
+The five files added by the build plan, each pinning something that had no test before:
+
+### `test_arm_balance.py` — 9
+The defect that made this file necessary: self-cure was rolled for the **control arm
+only**, so the treated arm recovered through interventions and the control arm through
+self-cure — two generative processes, not one world under two policies. Every test here
+checks the **coin flips**, not the outcomes, because by the time a treated case has
+recovered there is no way to tell an organic recovery from an earned one and a test
+written against outcomes would pass under the defect. An arm that is never rolled makes
+the statistic **undefined**, and undefined is asserted to be a failure — a missing
+measurement is not a measurement of zero. A second check catches a case whose coin was
+never flipped at all, which is invisible to the rate comparison; it found a live second
+instance of the bug (self-cure rolled once per *subscription*, so a subscription's second
+episode was never rolled).
+
+### `test_fencing.py` — 22
+Look before you leap, and verify after you write. The ledger re-fetch sees a settlement
+the case row does not; a mid-flight settlement stops the dispatch and **consumes neither
+the claim nor an attempt**; a settlement from *before* the case opened does not fence it;
+`RETRY_LATER` is not fenced because a silent re-charge of a settled mandate is a no-op
+rather than a message. Then the design rule, twice: **a broken re-fetch degrades to
+`unverified` and does not block**, and `unverified` is a recorded row rather than an
+absent one — "we did not check" must never be indistinguishable from "we checked and it
+was fine". The compensation entry is appended **even when the cancellation fails**. The
+fingerprint is proven quiet (notes, timestamps and metadata leave it stable) and proven
+sharp (every decision-relevant field moves it). The metric's numerator is driven
+**non-zero on purpose**, so it cannot be decoration.
+
+### `test_voice_and_promises.py` — 44
+That voice is an *action* and not a channel — membership of `CONTACT_ACTIONS` **is** the
+inheritance of I2, I5, I6, I7 and annoyance pricing, and `CONTACT_ACTIONS_SQL` is
+asserted to contain every member so the Python set and its SQL cannot drift. Every
+registered template in three languages passes the same validator as any other outbound
+string, **including against a Devanagari digit** — without that assertion the no-digits
+rule would have been an English-only rule. I8 is proven to fail closed on an empty
+allowlist, and a synthetic customer is proven undialable *by construction*. Then the
+schema: **the inbound reading has no amount field**, an amount-bearing payload is
+rejected rather than ignored, and the import-time guard refuses a money-shaped field.
+Promises are deadlined to the end of the named day **in IST** (midnight UTC is 05:30 in
+Delhi — a bug that could only ever punish the customer), a tracked promise overrides the
+fixed grace window, and a case can never close leaving one open.
+
+### `test_reporting.py` — 17
+Two tests here are about **method**, not output. A category with an empty arm must
+report as *unavailable* rather than as zero lift. And calibration must score **every**
+execution on a closed case, not only the last — scoring only the last keeps every success
+and discards every failure, which is not an attribution rule but a way of proving
+whatever you like. Plus: a stage that raises is still timed and its error still
+propagates; timing never breaks the pipeline; latency is wall clock even under a
+simulated clock.
+
+### `test_public_demo.py` — 16
+Fail closed, or do not start. Every provider credential refuses the boot on **presence,
+not validity** — checking whether a key works would mean using it. A populated allowlist
+refuses even with the send path off. The refusal names *every* reason rather than the
+first, because an operator who fixes one and restarts into the next learns the wrong
+lesson about how close they were. And every write is a **404, not a 403**: a 403
+announces there is an endpoint here and you may not use it, which is an invitation to
+hunt for the misconfigured one.
+
 ## 4. The adversarial suite — `test_concurrency.py`
 
 > Idempotency is easy to claim and hard to hold under a real race, so it is tested as one.
@@ -199,7 +261,7 @@ These are architecture constraints with teeth. Breaking one fails the build.
 
 ```mermaid
 flowchart LR
-    U["**pytest** — 133 tests<br/><small>units, boundaries, races</small>"] --> A["**acceptance checks** — 16<br/><small>run_batch.py, over the finished batch,<br/>derived from the rows</small>"] --> L["**live verification**<br/><small>/api/audit/verify · /api/metrics/trace/*<br/>· raw SQL · the reconciliation identity</small>"]
+    U["**pytest** — 241 tests<br/><small>units, boundaries, races</small>"] --> A["**acceptance checks** — 20<br/><small>run_batch.py, over the finished batch,<br/>derived from the rows</small>"] --> L["**live verification**<br/><small>/api/audit/verify · /api/metrics/trace/*<br/>· raw SQL · the reconciliation identity</small>"]
 ```
 
 Each layer checks something the previous one cannot:

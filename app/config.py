@@ -156,6 +156,64 @@ LIVE_LINKS_MAX = int(_env("LIVE_LINKS_MAX", "5"))
 # local app, and it is unauthenticated like the rest of the API, so it must be
 # switchable off in one place before this is ever bound to anything but localhost.
 CONTROL_ENABLED = _env_bool("CONTROL_API_ENABLED", True)
+
+# ------------------------------------------------------------- public demo
+# A deployment anyone can click. Off by default, because the safe default for a flag
+# that changes what the system is allowed to do is the one that changes nothing.
+#
+# Two things it does, and the second is the one that matters:
+#
+#  1. Every write route is disabled. Not hidden — a POST returns 404, so there is no
+#     endpoint to find rather than an endpoint that says no.
+#  2. **Boot REFUSES if any provider credential is present.** A public demo that could
+#     be handed a Razorpay key and start moving money by env var is not fail-closed; it
+#     is fail-closed-until-somebody-changes-their-mind. `assert_demo_safe()` runs at
+#     startup and exits non-zero, so the container dies instead of serving.
+#
+# The second is why this is a code path and not a Dockerfile line. A container is a
+# deployment detail; the bounds of the agent are source code.
+PUBLIC_DEMO = _env_bool("PUBLIC_DEMO", False)
+
+# Credentials whose mere PRESENCE contradicts a public demo. Not their validity —
+# checking whether a key works would mean using it, which is precisely what must not
+# happen here.
+_DEMO_FORBIDDEN_ENV = (
+    "RAZORPAY_KEY_ID",
+    "RAZORPAY_KEY_SECRET",
+    "RAZORPAY_WEBHOOK_SECRET",
+    "PLIVO_AUTH_ID",
+    "PLIVO_AUTH_TOKEN",
+)
+
+
+def demo_violations() -> list[str]:
+    """Every reason this process must not run as a public demo. Empty means it may."""
+    if not PUBLIC_DEMO:
+        return []
+    problems = [f"{name} is set" for name in _DEMO_FORBIDDEN_ENV if os.environ.get(name)]
+    if VOICE_REAL_SEND_ENABLED:
+        problems.append("VOICE_REAL_SEND_ENABLED is true")
+    if VERIFIED_RECIPIENTS:
+        problems.append(f"VERIFIED_RECIPIENTS lists {len(VERIFIED_RECIPIENTS)} number(s)")
+    if CONTROL_ENABLED:
+        problems.append("CONTROL_API_ENABLED is true — the control room runs subprocesses")
+    return problems
+
+
+def assert_demo_safe() -> None:
+    """Raise if this process claims to be a public demo and is not one.
+
+    Called from the startup hook. The failure mode this exists to prevent is a
+    deployment that is *mostly* a demo — read-only routes, seeded data, and one live
+    credential somebody added to test something and left behind.
+    """
+    problems = demo_violations()
+    if problems:
+        raise RuntimeError(
+            "PUBLIC_DEMO=true but this process holds live capability: "
+            + "; ".join(problems)
+            + ". Refusing to start. A demo that can be handed a credential is not a demo."
+        )
 MERCHANT_NAME = _env("MERCHANT_NAME", "Demo Subscriptions")
 
 # ------------------------------------------------------------------------ LLM

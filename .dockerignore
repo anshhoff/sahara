@@ -1,0 +1,13 @@
+.git
+.venv
+node_modules
+web/node_modules
+web/.next
+__pycache__
+*.pyc
+.pytest_cache
+recovery.db*
+synthetic_cases*.json
+graphify-out
+.env
+.DS_Store

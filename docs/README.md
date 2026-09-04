@@ -49,7 +49,7 @@ names the file that enforces it.
 | 10 | [Audit trail](10-audit-trail.md) | The hash-chained, append-only log and how to verify it as a sceptic |
 | 11 | [Measurement](11-measurement.md) | Every metric's definition, traceability, and the randomised control arm |
 | 14 | [Batch & synthetic data](14-batch-and-synthetic.md) | The generator, the outcome model, the runner, the acceptance checks |
-| 15 | [Testing](15-testing.md) | All 133 tests, what each file pins, and the adversarial suite |
+| 15 | [Testing](15-testing.md) | All 241 tests, what each file pins, and the adversarial suite |
 
 ### Surfaces
 | # | Document | What it answers |
@@ -66,6 +66,8 @@ names the file that enforces it.
 | 19 | [Decision log](19-decision-log.md) | The consequential design decisions, each with its alternative and its cost |
 | 20 | [Voice, promises & the AI question](20-voice-and-promises.md) | Escalation rung 3, the inbound schema with no amount field, I8, and the measured LLM ablation |
 | — | [Analysis plan](analysis-plan.md) | One primary metric, one secondary, everything else descriptive |
+| — | [VERIFY.md](../VERIFY.md) | Every claim mapped to the artifact that proves it and the command that re-proves it |
+| — | [THREAT-MODEL.md](../THREAT-MODEL.md) | What this system cannot do, and why there is no code path for it |
 | — | [Glossary](glossary.md) | Every term of art in one place |
 
 ---
@@ -92,7 +94,9 @@ These rules keep this folder from drifting away from the code:
 1. **Every rule cites its enforcing file.** If a doc states a bound, it names the
    module and the test that holds it.
 2. **Numbers are quoted with their run.** Any figure comes from the frozen 88-case
-   batch (`seed 42`, `LLM_PROVIDER=none`) unless labelled otherwise.
+   batch (`seed 42`, `LLM_PROVIDER=none`) unless labelled otherwise — and every one of
+   them is re-derived from the seed and byte-compared by `scripts/verify_numbers.py`,
+   which CI runs on every push. A figure that drifts from the code turns the build red.
 3. **Assumptions are labelled as assumptions.** Cost constants, recovery priors and
    the batch outcome model are stated estimates, never presented as measurement.
 4. **The code wins.** These documents describe intent; `app/` and `tests/` are the

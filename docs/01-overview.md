@@ -155,7 +155,7 @@ Each of these is a numbered rule in [07 Guardrails](07-guardrails.md), enforced 
 | Area | Files | Lines |
 |---|---|---|
 | `app/` — application | 15 modules | ~3,600 |
-| `tests/` — 133 tests | 14 files | ~1,700 |
+| `tests/` — 241 tests | 18 files | ~2,900 |
 | `scripts/` — generator, runner, LLM probe | 3 | ~1,000 |
 | `dashboard/` — no build step | 3 | ~2,200 |
 | `schema.sql` | 1 | 178 |

@@ -61,6 +61,25 @@ if config.CONTROL_ENABLED:
     # The dashboard's control room. Off in one place; see app/control.py.
     app.include_router(control.router)
 
+
+@app.middleware("http")
+async def _public_demo_is_read_only(request: Request, call_next):
+    """In demo mode every write is a 404, not a 403.
+
+    The difference is the point. A 403 tells a visitor there is an endpoint here and
+    they are not allowed to use it, which is an invitation to look for the one that is
+    misconfigured. A 404 says there is nothing here — which, in demo mode, is true:
+    routers that mutate are not mounted, and this middleware is the backstop for
+    anything that slips past that.
+
+    GET, HEAD and OPTIONS pass. The webhook receiver is a POST and is blocked with
+    everything else: a public demo has no signing secret, so every delivery would fail
+    signature verification anyway, and refusing at the door is the clearer answer.
+    """
+    if config.PUBLIC_DEMO and request.method not in ("GET", "HEAD", "OPTIONS"):
+        return JSONResponse({"detail": "Not Found"}, status_code=404)
+    return await call_next(request)
+
 _tick_task: asyncio.Task | None = None
 
 
@@ -84,6 +103,12 @@ async def _tick_loop() -> None:
 
 @app.on_event("startup")
 async def startup() -> None:
+    # Before anything else, including opening the database. A process that must not run
+    # should not have created a file by the time it finds out.
+    config.assert_demo_safe()
+    if config.PUBLIC_DEMO:
+        log.info("PUBLIC DEMO: every write route returns 404; no provider credential is "
+                 "present, and boot would have failed if one were")
     db.init()
     log.info("database ready at %s", config.DB_PATH)
     log.info("LLM provider: %s (copy drafting %s)",

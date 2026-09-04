@@ -1,0 +1,180 @@
+{
+  "audit_chain": {
+    "n_entries": 545,
+    "n_unchained": 0,
+    "status": "intact"
+  },
+  "calibration": {
+    "brier_score": 0.2581,
+    "ece": 0.1064,
+    "n_scored": 81
+  },
+  "classification": {
+    "llm": {
+      "accuracy": 0.25,
+      "correct": 1,
+      "n": 4
+    },
+    "rule": {
+      "accuracy": 1.0,
+      "correct": 84,
+      "n": 84
+    }
+  },
+  "costs": {
+    "handoff_paise": 68000,
+    "n_handoff_cases": 17,
+    "outreach_paise": 72900,
+    "total_paise": 140900
+  },
+  "declined_to_contact": 9,
+  "executions_by_action": {
+    "PROMISE_TO_PAY": 4,
+    "RETRY_LATER": 30,
+    "SEND_UPDATE_LINK": 38,
+    "STOP_HANDOFF": 0,
+    "VOICE_CALL": 9
+  },
+  "fencing": {
+    "n_compensations": 0,
+    "n_dispatches_fenced": 51,
+    "outreach_to_settled": 0
+  },
+  "incremental": {
+    "control": {
+      "n": 36,
+      "organic": 7,
+      "organic_rate": 0.1944,
+      "rate": 0.1944,
+      "recovered": 7,
+      "untouched": 7
+    },
+    "incremental_paise_ci95": [
+      704900,
+      2223089
+    ],
+    "incremental_paise_total": 1432967,
+    "lift": 0.4979,
+    "lift_ci95": [
+      0.3098,
+      0.6688
+    ],
+    "significant": true,
+    "treated": {
+      "n": 52,
+      "organic": 6,
+      "organic_rate": 0.1154,
+      "rate": 0.6923,
+      "recovered": 36,
+      "untouched": 0
+    }
+  },
+  "lift_by_category": [
+    {
+      "category": "card_expired",
+      "control_n": 8,
+      "control_recovered": 0,
+      "lift": 0.7143,
+      "lift_ci95": [
+        0.4286,
+        0.9286
+      ],
+      "treated_n": 14,
+      "treated_recovered": 10
+    },
+    {
+      "category": "insufficient_funds",
+      "control_n": 16,
+      "control_recovered": 4,
+      "lift": 0.55,
+      "lift_ci95": [
+        0.2333,
+        0.8125
+      ],
+      "treated_n": 15,
+      "treated_recovered": 12
+    },
+    {
+      "category": "issuer_declined",
+      "control_n": 4,
+      "control_recovered": 3,
+      "lift": 0.125,
+      "lift_ci95": [
+        -0.25,
+        0.625
+      ],
+      "treated_n": 8,
+      "treated_recovered": 7
+    },
+    {
+      "category": "authentication_failed",
+      "control_n": 2,
+      "control_recovered": 0,
+      "lift": 0.8571,
+      "lift_ci95": [
+        0.5714,
+        1.0
+      ],
+      "treated_n": 7,
+      "treated_recovered": 6
+    },
+    {
+      "category": "invalid_payment_method",
+      "control_n": 4,
+      "control_recovered": 0,
+      "lift": 0.5,
+      "lift_ci95": [
+        0.0,
+        1.0
+      ],
+      "treated_n": 2,
+      "treated_recovered": 1
+    },
+    {
+      "category": "unknown",
+      "control_n": 2,
+      "control_recovered": 0,
+      "lift": 0.0,
+      "lift_ci95": [
+        0.0,
+        0.0
+      ],
+      "treated_n": 6,
+      "treated_recovered": 0
+    }
+  ],
+  "n_cases": 88,
+  "n_open": 0,
+  "n_recovered": 43,
+  "net": {
+    "cost_per_100_recovered": 6.66,
+    "gross_recovered_paise": 2115700,
+    "net_incremental_paise": 1292067,
+    "net_incremental_paise_ci95": [
+      564000,
+      2082189
+    ],
+    "net_recovered_paise": 1974800
+  },
+  "promises": {
+    "n_promises": 4,
+    "promises_broken": 2,
+    "promises_kept": 2
+  },
+  "recovery_rate": 0.4886,
+  "seed": 42,
+  "stopped_by_status": {
+    "stopped_already_settled": 0,
+    "stopped_cooldown_expired": 0,
+    "stopped_handoff": 9,
+    "stopped_holdout": 27,
+    "stopped_max_attempts": 0,
+    "stopped_opt_out": 1,
+    "stopped_suppressed": 0,
+    "stopped_uneconomic": 0,
+    "stopped_unknown": 8,
+    "stopped_unverified_recipient": 0
+  },
+  "total_at_risk_paise": 7241200,
+  "total_recovered_paise": 2115700
+}
