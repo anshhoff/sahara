@@ -29,9 +29,14 @@ beforehand. Wiring them together would score every decision with the answer key.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 from app import config
+
+# A sentinel distinct from None, because None is a meaningful value for `alternative`:
+# it means "the counterfactual is to do nothing, at no cost". Defaulting to None would
+# make "I did not say" and "I said nothing happens" indistinguishable.
+_UNSET: Any = object()
 
 # Actions that are decisions to stop rather than interventions to run. They still
 # cost something (a handoff occupies a person), but there is no alternative to weigh
@@ -69,13 +74,40 @@ def annoyance_cost_paise(action: str, attempt: int, amount_paise: int) -> int:
     return int(round(hazard * config.LTV_HORIZON_MONTHS * int(amount_paise)))
 
 
-def evaluate(case: dict[str, Any], action: str, attempt: int) -> dict[str, Any]:
-    """Price one proposed intervention. Pure arithmetic over config and the case —
-    no database, no clock, no model — so it is trivially testable and cannot have a
-    side effect on the case it is judging."""
+def fallback_action(attempt: int) -> Optional[str]:
+    """What happens to a case if the proposed intervention is refused.
+
+    This is the single most consequential thing about the gate, and it was wrong.
+
+    Refusing an early attempt closes the case as `stopped_uneconomic`: nobody works it,
+    and that costs nothing — which is why the alternative EV there is zero. But at the
+    FINAL attempt the alternative is not "abandon the case". It is the human queue,
+    which is exactly what the policy table did at attempt 3 before there was any other
+    rung, and a person costs Rs 40.
+
+    Pricing an action against "do nothing" when doing nothing is not on the menu is the
+    wrong comparison, and it has a direction: it makes every last-rung intervention look
+    unaffordable no matter how much cheaper it is than the alternative it replaces.
+    """
+    return "STOP_HANDOFF" if int(attempt) >= config.MAX_ATTEMPTS else None
+
+
+def evaluate(case: dict[str, Any], action: str, attempt: int,
+             alternative: Optional[str] = _UNSET) -> dict[str, Any]:
+    """Price one proposed intervention AGAINST WHAT WOULD HAPPEN INSTEAD.
+
+    Pure arithmetic over config and the case — no database, no clock, no model — so it
+    is trivially testable and cannot have a side effect on the case it is judging.
+
+    `alternative` defaults to `fallback_action(attempt)`. Pass it explicitly (including
+    as None, meaning "the alternative is to do nothing, at no cost") to price a decision
+    against a specific counterfactual.
+    """
     category = case.get("current_category") or "unknown"
     amount = int(case["amount_at_risk_paise"])
     attempt = _clamp_attempt(attempt)
+    if alternative is _UNSET:
+        alternative = fallback_action(attempt)
 
     p = p_recover(category, action, attempt)
     gross = p * amount
@@ -83,7 +115,24 @@ def evaluate(case: dict[str, Any], action: str, attempt: int) -> dict[str, Any]:
     annoyance = annoyance_cost_paise(action, attempt, amount)
     ev = int(round(gross - direct - annoyance))
 
+    # The counterfactual, priced the same way. A STOP_HANDOFF recovers nothing on its
+    # own in this model and irritates nobody, so its EV is simply minus its cost.
+    if alternative is None:
+        alt_ev = 0
+    else:
+        # A non-intervention recovers NOTHING on its own. It must not inherit
+        # P_RECOVER_DEFAULT, which would credit a handoff with an 8% chance of the money
+        # arriving by itself and make the human queue the best-value option on the board
+        # — beating every intervention it was supposed to be compared against. The
+        # default exists for pairs nobody reasoned about; this is a pair with an answer.
+        alt_p = 0.0 if alternative in NON_INTERVENTION_ACTIONS else p_recover(
+            category, alternative, attempt)
+        alt_ev = int(round(
+            alt_p * amount - direct_cost_paise(alternative)
+            - annoyance_cost_paise(alternative, attempt, amount)))
+
     gated = action not in NON_INTERVENTION_ACTIONS
+    beats_alternative = ev > alt_ev
     return {
         "action": action,
         "category": category,
@@ -94,15 +143,20 @@ def evaluate(case: dict[str, Any], action: str, attempt: int) -> dict[str, Any]:
         "direct_cost_paise": direct,
         "annoyance_cost_paise": annoyance,
         "ev_paise": ev,
+        "alternative_action": alternative,
+        "alternative_ev_paise": alt_ev,
+        "margin_over_alternative_paise": ev - alt_ev,
         # `gated` says whether this EV is allowed to stop anything, and it is recorded
         # so that a STOP_HANDOFF carrying a negative EV cannot be misread as a gate
         # that failed to fire.
         "gated": gated,
         "positive": ev > 0,
-        "verdict": "proceed" if (not gated or ev > 0) else "stop_uneconomic",
+        "verdict": "proceed" if (not gated or beats_alternative) else "stop_uneconomic",
         "basis": ("p_recover is config.P_RECOVER_PRIOR — the agent's prior, deliberately "
                   "not the simulator's outcome model; costs are stated assumptions in "
-                  "config.py, not measurements"),
+                  "config.py, not measurements. The gate compares this action against "
+                  "`alternative_action`, which is what the case would do instead — not "
+                  "against zero, because doing nothing is not always on the menu."),
     }
 
 

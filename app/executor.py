@@ -15,7 +15,7 @@ import logging
 import re
 from typing import Any, Optional
 
-from app import audit, cases, clock, config, db, economics, fencing, invariants, llm
+from app import audit, cases, clock, config, db, economics, fencing, inbound, invariants, llm
 
 log = logging.getLogger(__name__)
 
@@ -281,10 +281,100 @@ def send_promise_offer(case: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+# ------------------------------------------------------------------ voice
+# What the customer said, when anything did. In live mode this would be filled by an
+# IVR or telephony webhook; in the batch it is set by scripts/run_batch.py, which is
+# the only thing that can know what a simulated customer would say. A provider hook
+# rather than an import, so app/ never reaches into the simulator — the same boundary
+# that keeps the agent's priors from being scored with the answer key.
+_transcript_provider: Any = None
+
+
+def set_transcript_provider(fn: Any) -> None:
+    global _transcript_provider
+    _transcript_provider = fn
+
+
+def voice_script(case: dict[str, Any], language: Optional[str] = None) -> tuple[str, str]:
+    """(rendered script, language). Registered templates only — an unregistered variant
+    cannot be spoken, because there is nothing to look up."""
+    language = language or config.VOICE_DEFAULT_LANGUAGE
+    if language not in config.VOICE_LANGUAGES:
+        raise ValueError(f"voice language {language!r} is not registered")
+    category = case.get("current_category") or "unknown"
+    skeleton = config.VOICE_TEMPLATES[(category, language)]
+    check = validate_copy(skeleton, case)
+    if not check["ok"]:  # a registered template must never fail its own validator
+        raise AssertionError(
+            f"voice template ({category}, {language}) fails copy validation: {check['problems']}")
+    return render_slots(skeleton, case), language
+
+
+def place_voice_call(case: dict[str, Any]) -> dict[str, Any]:
+    """Escalation rung 3: a call, before a person.
+
+    Simulated by default and recorded honestly as such. `plivo_trial_verified` is the
+    only mode that means a signal actually left this process, and reaching it requires
+    I8 to have passed — which for a synthetic case it cannot, because a synthetic
+    customer has no number.
+
+    The call's *inbound* half is what makes this rung worth more than a third SMS: a
+    person can say when they will pay, and app/inbound.py turns that into a dated,
+    tracked promise. Nothing the customer says can name an amount; there is no field.
+    """
+    script, language = voice_script(case)
+    url = _simulated_link(case)
+    message = inject_link(script, url)
+
+    verified = invariants.verified_recipient(case)
+    real = invariants.would_really_transmit(case, "VOICE_CALL") and verified is not None
+    mode = "plivo_trial_verified" if real else "simulated"
+
+    transcript = None
+    if _transcript_provider is not None:
+        try:
+            transcript = _transcript_provider(case)
+        except Exception as exc:      # a broken provider must not fail the call
+            log.warning("transcript provider failed for case %s: %s", case["id"], exc)
+
+    reading = (inbound.read(transcript) if transcript is not None
+               else {"intent": "no_answer", "promised_date": None, "confidence": 1.0,
+                     "rationale": "no inbound transcript for this call", "source": "rule"})
+
+    deadline = clock.plus_hours(clock.now(), config.PROMISE_WINDOW_HOURS)
+    return {
+        "mode": mode,
+        "razorpay_ref": None,
+        "status": "success",
+        "simulated_channel": "voice",
+        "message_copy": message,
+        "copy_source": "static_template",
+        "copy_validation": {"ok": True, "problems": [], "source": "voice_template",
+                            "language": language},
+        "result_payload": {
+            "action": "place_voice_call",
+            "language": language,
+            "script": message,
+            "transmission": ("REAL — a verified, allowlisted recipient (I8)" if real else
+                             "SIMULATED — composed and logged, never dialled"),
+            "recipient": verified,
+            "link_url": url,
+            # The grace window before a human takes over, identical in shape to
+            # promise-to-pay's. A tracked promise, when there is one, overrides it: the
+            # date the customer named is a better deadline than one we invented.
+            "voice_deadline": clock.to_iso(deadline),
+            "voice_window_hours": config.PROMISE_WINDOW_HOURS,
+            "inbound_transcript": transcript,
+            "inbound_reading": reading,
+        },
+    }
+
+
 _HANDLERS = {
     "RETRY_LATER": lambda case: retry_charge(case),
     "SEND_UPDATE_LINK": lambda case: send_update_link(case),
     "PROMISE_TO_PAY": lambda case: send_promise_offer(case),
+    "VOICE_CALL": lambda case: place_voice_call(case),
 }
 
 
@@ -465,6 +555,20 @@ def execute_decision(decision: dict[str, Any]) -> Optional[dict[str, Any]]:
             "result_payload": result.get("result_payload"),
         },
     )
+    # The inbound half of a voice call. Recorded only AFTER the execution row exists, so
+    # a promise always has an execution to point at, and so a failure here cannot leave
+    # a promise with no call behind it.
+    reading = (result.get("result_payload") or {}).get("inbound_reading")
+    if decision["action"] == "VOICE_CALL" and isinstance(reading, dict):
+        cases.record_promise(case["id"], reading, execution_id=execution_id)
+        if reading.get("intent") in inbound.SUPPRESSING_INTENTS:
+            # Said on a call, honoured everywhere: suppression is per PERSON (I6), so it
+            # reaches this customer's other subscriptions too. The model produced the
+            # reading; the write is deterministic code acting on a closed enum.
+            cases.suppress_customer(
+                case["customer_id"], "opt_out", source="voice_call",
+                note=f"inbound reading: {reading.get('intent')}")
+
     # ------------------------------------------------------------- fence 2 of 2
     # Verify after write. The link exists and cannot be un-created; what can still be
     # done is cancel it and say so. The compensation entry is appended whether or not
@@ -508,24 +612,63 @@ def due_decisions(now_iso: Optional[str] = None, include_synthetic: bool = True)
     )
 
 
+def _sweep_tracked_promises(include_synthetic: bool = True) -> int:
+    """A promise the customer actually made, whose named day is over.
+
+    This runs BEFORE the fixed-window sweep below and takes precedence over it: when
+    someone has said "Friday", Friday is the deadline, not a 72-hour clock we started
+    when we happened to call. `cases.transition` resolves the promise as broken as part
+    of closing the case, so a case can never close leaving a promise dangling open.
+    """
+    closed = 0
+    for promise in cases.due_promises(include_synthetic):
+        case = cases.get(promise["case_id"])
+        if case is None or case["status"] != "open":
+            continue
+        cases.transition(
+            case["id"], "stopped_handoff",
+            summary=(f"The customer said they would pay on {promise['promised_date']}. "
+                     "That day has passed unpaid; handed off to the human queue."),
+            detail={"promise_id": promise["id"],
+                    "promised_date": promise["promised_date"],
+                    "due_at": promise["due_at"],
+                    "reading_source": promise["source"],
+                    "execution_id": promise["execution_id"]},
+        )
+        closed += 1
+    return closed
+
+
 def _close_lapsed_promises(include_synthetic: bool = True) -> int:
-    """A promise-to-pay that was not honoured inside its window goes to the human
-    queue — it is never retried, because attempt 3 was the last one."""
+    """A promise-to-pay or a voice call whose grace window ran out goes to the human
+    queue — never retried, because attempt 3 was the last one.
+
+    Cases with an OPEN tracked promise are skipped: their deadline is the day the
+    customer named, swept by `_sweep_tracked_promises`, and applying a fixed 72-hour
+    window on top of it would hand off someone who promised next Tuesday and still has
+    until Tuesday.
+    """
     closed = 0
     rows = db.query(
-        "SELECT e.case_id AS case_id, e.executed_at AS executed_at, e.id AS execution_id"
+        "SELECT e.case_id AS case_id, e.executed_at AS executed_at, e.id AS execution_id,"
+        "       e.action AS action"
         " FROM execution_record e JOIN recovery_case c ON c.id = e.case_id"
-        " WHERE e.action = 'PROMISE_TO_PAY' AND c.status = 'open'"
+        " WHERE e.action IN ('PROMISE_TO_PAY','VOICE_CALL') AND c.status = 'open'"
         + ("" if include_synthetic else " AND c.synthetic = 0")
     )
     for row in rows:
+        if cases.open_promise(row["case_id"]) is not None:
+            continue
         deadline = clock.plus_hours(clock.parse_iso(row["executed_at"]), config.PROMISE_WINDOW_HOURS)
         if clock.now() >= deadline:
+            what = ("Promise-to-pay window" if row["action"] == "PROMISE_TO_PAY"
+                    else "Voice-call follow-up window")
             cases.transition(
                 row["case_id"], "stopped_handoff",
-                summary=(f"Promise-to-pay window of {config.PROMISE_WINDOW_HOURS}h lapsed unpaid; "
+                summary=(f"{what} of {config.PROMISE_WINDOW_HOURS}h lapsed unpaid; "
                          "handed off to the human queue with a complete case file"),
-                detail={"execution_id": row["execution_id"], "promise_deadline": clock.to_iso(deadline)},
+                detail={"execution_id": row["execution_id"], "action": row["action"],
+                        "promise_deadline": clock.to_iso(deadline)},
             )
             closed += 1
     return closed
@@ -579,11 +722,13 @@ def tick(include_synthetic: bool = True) -> dict[str, Any]:
         record = execute_decision(decision)
         if record is not None:
             executions.append(record)
+    tracked = _sweep_tracked_promises(include_synthetic)
     promises = _close_lapsed_promises(include_synthetic)
     expired = _close_expired_episodes(include_synthetic)
     return {
         "at": clock.now_iso(),
         "executions": executions,
+        "promises_broken": tracked,
         "promises_lapsed": promises,
         "episodes_expired": expired,
     }

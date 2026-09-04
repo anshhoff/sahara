@@ -9,6 +9,8 @@ case can never be reopened or silently re-labelled.
 """
 from __future__ import annotations
 
+import json
+from datetime import timedelta
 from typing import Any, Optional
 
 from app import audit, clock, config, db
@@ -184,6 +186,106 @@ def record_execution(case_id: str, action: str) -> dict[str, Any]:
     return get(case_id)
 
 
+# ------------------------------------------------------------------- promises
+# `send_promise_offer` sets a 72-hour window and calls the result a promise. It is not
+# one: nothing the customer said is recorded anywhere, so there is no promise to keep
+# or to break — only an offer that expired. What follows is the other thing. A date the
+# customer ACTUALLY NAMED, scheduled to, swept on lapse, and resolved as kept or broken.
+#
+# The reading that produces it (app/inbound.py) carries an intent and a date and NO
+# AMOUNT, and neither does the table. That is deliberate and it is structural: a
+# compromised model cannot make this system state a wrong rupee figure because there is
+# nowhere for the figure to travel.
+
+
+def promise_deadline(promised_date: str) -> str:
+    """The end of the day the customer named, in IST.
+
+    Not the start: someone who says "Friday" has until Friday is over, and marking them
+    broken at midnight UTC — 05:30 on Friday morning in Delhi — would be a bug that
+    only ever punished the customer.
+    """
+    day = clock.parse_iso(promised_date + "T00:00:00+05:30")
+    return clock.to_iso(clock.plus_hours(day, 24) - timedelta(seconds=1))
+
+
+def record_promise(case_id: str, reading: dict[str, Any], *,
+                   execution_id: Optional[str] = None) -> Optional[dict[str, Any]]:
+    """Persist a dated promise from an inbound reading. Returns None if there is none.
+
+    One open promise per case, ever. A second reading on the same case supersedes
+    nothing — it is simply not recorded, because a customer who names two dates has
+    given us one promise and one revision, and treating the revision as a fresh promise
+    would let a case accumulate an unbounded number of things to break.
+    """
+    if reading.get("intent") != "will_pay_on_date" or not reading.get("promised_date"):
+        return None
+    if db.query_one("SELECT 1 FROM promise WHERE case_id = ? AND status = 'open'", (case_id,)):
+        return None
+
+    case = get(case_id)
+    if case is None:
+        return None
+    promise_id = db.new_id("prom")
+    due_at = promise_deadline(reading["promised_date"])
+    db.insert("promise", {
+        "id": promise_id,
+        "case_id": case_id,
+        "execution_id": execution_id,
+        "intent": reading["intent"],
+        "promised_date": reading["promised_date"],
+        "source": reading.get("source") or "rule",
+        "reading_confidence": float(reading.get("confidence") or 0.0),
+        "reading_raw": json.dumps(reading, sort_keys=True, default=str),
+        "status": "open",
+        "created_at": clock.now_iso(),
+        "due_at": due_at,
+        "resolved_at": None,
+        "synthetic": case["synthetic"],
+    })
+    audit.audit(
+        case_id, "execute", "system",
+        f"Promise recorded: the customer said they would pay on {reading['promised_date']}",
+        {
+            "promise_id": promise_id,
+            "promised_date": reading["promised_date"],
+            "due_at": due_at,
+            "reading_source": reading.get("source"),
+            "reading_confidence": reading.get("confidence"),
+            "rationale": reading.get("rationale"),
+            "execution_id": execution_id,
+            "note": ("the date is what the customer named; the amount is not from them and "
+                     "never can be — the inbound schema has no field for one"),
+        },
+    )
+    return db.row_to_dict(db.query_one("SELECT * FROM promise WHERE id = ?", (promise_id,)))
+
+
+def open_promise(case_id: str) -> Optional[dict[str, Any]]:
+    return db.row_to_dict(db.query_one(
+        "SELECT * FROM promise WHERE case_id = ? AND status = 'open' ORDER BY created_at DESC LIMIT 1",
+        (case_id,)))
+
+
+def resolve_promises(case_id: str, status: str) -> int:
+    """Close every open promise on a case as kept or broken. Returns how many moved."""
+    if status not in ("kept", "broken"):
+        raise ValueError(f"a promise resolves as kept or broken, not {status!r}")
+    rows = db.query("SELECT id FROM promise WHERE case_id = ? AND status = 'open'", (case_id,))
+    for row in rows:
+        db.update("promise", row["id"], {"status": status, "resolved_at": clock.now_iso()})
+    return len(rows)
+
+
+def due_promises(include_synthetic: bool = True) -> list[dict[str, Any]]:
+    """Open promises whose named day is over."""
+    return db.rows_to_dicts(db.query(
+        "SELECT * FROM promise WHERE status = 'open' AND due_at <= ?"
+        + ("" if include_synthetic else " AND synthetic = 0")
+        + " ORDER BY due_at ASC",
+        (clock.now_iso(),)))
+
+
 def transition(case_id: str, new_status: str, *, summary: str, detail: dict[str, Any] | None = None,
                actor: str = "system", stage: Optional[str] = None) -> dict[str, Any]:
     case = get(case_id)
@@ -197,6 +299,14 @@ def transition(case_id: str, new_status: str, *, summary: str, detail: dict[str,
 
     now = clock.now_iso()
     db.update("recovery_case", case_id, {"status": new_status, "closed_at": now, "updated_at": now})
+
+    # A promise resolves with the case it was made about. Recovering keeps it; any
+    # other terminal state breaks it. Doing this inside transition() rather than at each
+    # call site is what makes it impossible to close a case and leave a promise dangling
+    # open forever, which would quietly inflate promises_kept by never counting the
+    # failures.
+    if db.query_one("SELECT 1 FROM promise WHERE case_id = ? AND status = 'open'", (case_id,)):
+        resolve_promises(case_id, "kept" if new_status == "recovered" else "broken")
 
     stage = stage or _CLOSING_STAGE.get(new_status, "stop")
     payload = dict(detail or {})

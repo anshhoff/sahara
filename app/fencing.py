@@ -315,7 +315,7 @@ def fence_stats() -> dict[str, Any]:
         "SELECT e.id AS execution_id, e.case_id AS case_id, f.id AS fence_id"
         " FROM dispatch_fence f JOIN execution_record e ON e.case_id = f.case_id"
         " WHERE f.phase = ? AND f.verdict = ? AND e.executed_at > f.checked_at"
-        "   AND e.action IN ('SEND_UPDATE_LINK','PROMISE_TO_PAY','VOICE_CALL')",
+        f"   AND e.action IN {config.CONTACT_ACTIONS_SQL}",
         (PRE_DISPATCH, SETTLED))
     compensations = db.rows_to_dicts(db.query(
         "SELECT case_id, seq, summary, created_at FROM audit_log WHERE stage = 'compensate'"

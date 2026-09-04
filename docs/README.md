@@ -64,6 +64,8 @@ names the file that enforces it.
 | 17 | [Concurrency & failure](17-concurrency-and-failure.md) | Every race the system is exposed to, the claim tokens, at-most-once posture |
 | 18 | [Limits & roadmap](18-limits-and-roadmap.md) | What is not proven, what is out of scope, and what extending it would take |
 | 19 | [Decision log](19-decision-log.md) | The consequential design decisions, each with its alternative and its cost |
+| 20 | [Voice, promises & the AI question](20-voice-and-promises.md) | Escalation rung 3, the inbound schema with no amount field, I8, and the measured LLM ablation |
+| — | [Analysis plan](analysis-plan.md) | One primary metric, one secondary, everything else descriptive |
 | — | [Glossary](glossary.md) | Every term of art in one place |
 
 ---

@@ -27,6 +27,17 @@ two failing subscriptions, and nothing above would stop both of them messaging a
   I6  suppression list beats everything   -> stopped_suppressed
   I7  daily contact and spend ceilings    -> defer to the next window
 
+TRANSMISSION — the boundary between composing a message and actually sending one.
+
+  I8  a real transmission may only reach an allowlisted, verified number, and
+      refuses otherwise                   -> stopped_unverified_recipient
+
+  I8 is the only invariant that FAILS CLOSED on absence rather than on a violation.
+  The others ask "is there a reason to stop?"; I8 asks "is there a reason to proceed?"
+  and stops when there is not. A synthetic customer has no verified number by
+  construction, so a synthetic case cannot be dialled — that is a property of the data
+  model, not a rule somebody remembered to write.
+
 Economics (gate E1, app/economics.py) is deliberately NOT here. These are safety and
 consent rules that no business case may override; that one is a business case.
 
@@ -66,7 +77,44 @@ INVARIANT_TEXT = {
     "I7": (f"at most {config.MAX_CONTACTS_PER_CUSTOMER_PER_DAY} contacts per customer per IST "
            f"day, and at most Rs {config.DAILY_OUTREACH_BUDGET_PAISE / 100:,.0f} of outreach "
            f"across all customers per IST day"),
+    "I8": ("a real transmission may only reach a number on the verified-recipient "
+           "allowlist; anything else refuses, and a synthetic customer has no verified "
+           "number by construction"),
 }
+
+
+# Actions capable of leaving this process and reaching a real human being over a real
+# network. A Payment Link is created with notifications explicitly disabled and its
+# copy is only ever logged, so SEND_UPDATE_LINK and PROMISE_TO_PAY transmit nothing;
+# a voice call is the first action in this system that could.
+TRANSMITTING_ACTIONS = frozenset({"VOICE_CALL"})
+
+
+def would_really_transmit(case: dict[str, Any], action: str) -> bool:
+    """Whether this action, on this case, would put a signal on a real network.
+
+    Three independent conditions, all of which must hold. Any one of them false means
+    nothing leaves the process, and I8 has nothing to gate.
+    """
+    return (
+        action in TRANSMITTING_ACTIONS
+        and config.VOICE_REAL_SEND_ENABLED
+        and int(case.get("synthetic") or 0) == 0
+    )
+
+
+def verified_recipient(case: dict[str, Any]) -> Optional[str]:
+    """The allowlisted destination for this case, or None.
+
+    Synthetic customers have no phone number anywhere in this system — not an empty
+    one, not a placeholder one, none — so this returns None for them however the
+    allowlist is configured. That is the structural half of I8: the refusal does not
+    depend on anyone remembering to check a flag.
+    """
+    if int(case.get("synthetic") or 0) == 1:
+        return None
+    number = (case.get("recipient_msisdn") or "").strip()
+    return number if number and number in config.VERIFIED_RECIPIENTS else None
 
 
 def is_suppressed(customer_id: str) -> Optional[dict[str, Any]]:
@@ -85,7 +133,7 @@ def contacts_today(customer_id: str, at: Optional[datetime] = None) -> int:
     start, end = clock.ist_day_bounds(at)
     return int(db.scalar(
         "SELECT COUNT(*) FROM execution_record e JOIN recovery_case c ON c.id = e.case_id"
-        " WHERE c.customer_id = ? AND e.action IN ('SEND_UPDATE_LINK','PROMISE_TO_PAY')"
+        f" WHERE c.customer_id = ? AND e.action IN {config.CONTACT_ACTIONS_SQL}"
         " AND e.executed_at >= ? AND e.executed_at < ?",
         (customer_id, start, end), 0))
 
@@ -156,6 +204,7 @@ def check(case_or_id: Any, proposed_action: Optional[str] = None, *, phase: str 
     # whether they fired.
     contact = proposed_action in config.CONTACT_ACTIONS
     applicable = PASS if contact else NOT_APPLICABLE
+    transmits = would_really_transmit(case, proposed_action)
     details: dict[str, str] = {
         "I1": PASS,
         "I2": applicable,
@@ -164,6 +213,11 @@ def check(case_or_id: Any, proposed_action: Optional[str] = None, *, phase: str 
         "I5": applicable,
         "I6": PASS,
         "I7": applicable,
+        # I8 is genuinely inapplicable to anything that cannot transmit, and saying so
+        # is not a weaker claim than PASS — it is a more accurate one. A receipt reading
+        # `pass` on a gate that had nothing to gate would make the trail claim more
+        # than it can support, which is the same reasoning as the contact gates above.
+        "I8": PASS if transmits else NOT_APPLICABLE,
         "phase": phase,
     }
 
@@ -187,6 +241,15 @@ def check(case_or_id: Any, proposed_action: Optional[str] = None, *, phase: str 
         details["I4"] = "violated"
         return Verdict(STOP, details, "I4", "stopped_unknown",
                        reason="failure cause is unknown; the agent does not guess")
+
+    # I8 sits with the hard stops rather than the timing gates: an unverified recipient
+    # is not something that becomes permissible in the morning.
+    if transmits and verified_recipient(case) is None:
+        details["I8"] = "violated"
+        return Verdict(
+            STOP, details, "I8", "stopped_unverified_recipient",
+            reason=("a real transmission was proposed to a destination that is not on the "
+                    "verified-recipient allowlist; refusing rather than dialling"))
 
     if int(case["attempt_count"]) >= config.MAX_ATTEMPTS:
         details["I1"] = "violated"

@@ -170,9 +170,57 @@ def llm_involvement() -> dict[str, int]:
 
 def execution_modes() -> dict[str, int]:
     rows = db.query("SELECT mode, COUNT(*) AS n FROM execution_record GROUP BY mode")
-    out = {"razorpay_test": 0, "simulated": 0}
+    # `plivo_trial_verified` is listed even at zero, on purpose. "Did this system ever
+    # actually dial a real person?" deserves a visible answer rather than a missing key.
+    out = {"razorpay_test": 0, "simulated": 0, "plivo_trial_verified": 0}
     out.update({r["mode"]: int(r["n"]) for r in rows})
     return out
+
+
+def executions_by_action() -> dict[str, int]:
+    """Voice calls counted distinctly from link sends — the acceptance criterion for
+    registering VOICE_CALL as an action rather than a channel."""
+    out = {a: 0 for a in config.ACTIONS}
+    out.update({r["action"]: int(r["n"]) for r in db.query(
+        "SELECT action, COUNT(*) AS n FROM execution_record GROUP BY action")})
+    return out
+
+
+# -------------------------------------------------------------------- promises
+def promises() -> dict[str, Any]:
+    """Dated promises the customer actually made, and whether they held.
+
+    Traceable like everything else: the case ids behind each count are returned, so
+    `promises_kept` can be walked back to the audit entry that recorded the date and
+    the outcome entry that settled it.
+
+    `promises_kept` is not a recovery metric. A kept promise is a case that recovered,
+    and it is already counted there; this measures whether the READING was worth
+    anything — whether scheduling to a date a model extracted from Hinglish speech beats
+    doing nothing with it.
+    """
+    rows = db.rows_to_dicts(db.query(
+        "SELECT id, case_id, status, promised_date, due_at, source, reading_confidence"
+        " FROM promise ORDER BY created_at"))
+    by_status: dict[str, list[str]] = {"open": [], "kept": [], "broken": []}
+    by_source: dict[str, dict[str, int]] = {}
+    for r in rows:
+        by_status.setdefault(r["status"], []).append(r["case_id"])
+        bucket = by_source.setdefault(r["source"], {"open": 0, "kept": 0, "broken": 0})
+        bucket[r["status"]] = bucket.get(r["status"], 0) + 1
+    resolved = len(by_status["kept"]) + len(by_status["broken"])
+    return {
+        "n_promises": len(rows),
+        "promises_kept": len(by_status["kept"]),
+        "promises_broken": len(by_status["broken"]),
+        "promises_open": len(by_status["open"]),
+        "kept_rate": round(len(by_status["kept"]) / resolved, 4) if resolved else None,
+        "case_ids": {k: v for k, v in by_status.items()},
+        "by_reading_source": by_source,
+        "note": ("a promise is a date the customer NAMED, not a window we imposed. There is "
+                 "no amount on a promise and there cannot be one — the inbound schema has "
+                 "no field for a figure, so a compromised model has nowhere to put one."),
+    }
 
 
 # ------------------------------------------------------------------ provenance
@@ -482,6 +530,8 @@ def summary() -> dict[str, Any]:
         "stopped": {"total": sum(by_status.values()), "by_status": by_status},
         "llm": llm_involvement(),
         "execution_modes": execution_modes(),
+        "executions_by_action": executions_by_action(),
+        "promises": promises(),
         "reconciliation": reconciliation(),
         "incremental": incremental_recovery(),
         "fencing": fencing.fence_stats(),
@@ -502,10 +552,22 @@ def summary() -> dict[str, Any]:
     }
 
 
+def promises_kept() -> Traced:
+    ids = _ids("SELECT case_id AS id FROM promise WHERE status = 'kept' ORDER BY created_at")
+    return len(ids), ids
+
+
+def promises_broken() -> Traced:
+    ids = _ids("SELECT case_id AS id FROM promise WHERE status = 'broken' ORDER BY created_at")
+    return len(ids), ids
+
+
 TRACEABLE = {
     "recovered": recovered,
     "at_risk": at_risk,
     "stopped": stopped,
+    "promises_kept": promises_kept,
+    "promises_broken": promises_broken,
 }
 
 

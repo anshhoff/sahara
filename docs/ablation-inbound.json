@@ -1,0 +1,949 @@
+{
+  "columns": {
+    "date": {
+      "mcnemar_p": 0.375,
+      "model_accuracy": 0.9333,
+      "model_accuracy_ci95": [
+        0.7868,
+        0.9815
+      ],
+      "model_correct": 28,
+      "model_wins": 4,
+      "n": 30,
+      "rule_accuracy": 0.8333,
+      "rule_accuracy_ci95": [
+        0.6644,
+        0.9266
+      ],
+      "rule_correct": 25,
+      "rule_wins": 1,
+      "significant_at_05": false,
+      "winner": "model"
+    },
+    "intent": {
+      "mcnemar_p": 0.00098,
+      "model_accuracy": 0.9667,
+      "model_accuracy_ci95": [
+        0.8333,
+        0.9941
+      ],
+      "model_correct": 29,
+      "model_wins": 11,
+      "n": 30,
+      "rule_accuracy": 0.6,
+      "rule_accuracy_ci95": [
+        0.4232,
+        0.7541
+      ],
+      "rule_correct": 18,
+      "rule_wins": 0,
+      "significant_at_05": true,
+      "winner": "model"
+    },
+    "policy_facts": {
+      "mcnemar_p": 0.01172,
+      "model_accuracy": 0.9,
+      "model_accuracy_ci95": [
+        0.7438,
+        0.9654
+      ],
+      "model_correct": 27,
+      "model_wins": 10,
+      "n": 30,
+      "rule_accuracy": 0.6,
+      "rule_accuracy_ci95": [
+        0.4232,
+        0.7541
+      ],
+      "rule_correct": 18,
+      "rule_wins": 1,
+      "significant_at_05": true,
+      "winner": "model"
+    }
+  },
+  "generated_at": "2026-09-04T08:35:55+00:00",
+  "honesty": "labels are the author's, on thirty items \u2014 small, and the interval says so. Roughly a third of the items are phrasings the keyword table was never written against, which is the honest way to ask whether keywords generalise. The result is published in whichever direction it lands.",
+  "method": {
+    "primary_column": "policy_facts",
+    "test": "McNemar exact, two-sided, on the paired disagreements",
+    "why": "two readings that disagree about wording but schedule the same sweep on the same day have not disagreed about anything the system does",
+    "why_exact": "thirty items produce single-digit discordant counts, where the chi-square approximation is not trustworthy",
+    "why_paired": "both readers see the identical items; the agreements carry no information about which reader is better, and an unpaired test would discard the pairing"
+  },
+  "model": "openai/gpt-oss-20b",
+  "n_items": 30,
+  "provider": "openai_compat",
+  "resolved_against": "2026-03-02T09:00:00+00:00",
+  "rows": [
+    {
+      "model": {
+        "confidence": 0.95,
+        "intent": "will_pay_on_date",
+        "promised_date": "2026-03-04",
+        "rationale": "They said they will pay on Friday after salary."
+      },
+      "model_score": {
+        "date": false,
+        "intent": true,
+        "policy_facts": false
+      },
+      "rule": {
+        "confidence": 1.0,
+        "intent": "will_pay_on_date",
+        "promised_date": "2026-03-06",
+        "rationale": "matched 'kar dunga'"
+      },
+      "rule_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "transcript": "haan bhai, salary aane ke baad Friday ko kar dunga",
+      "truth": {
+        "intent": "will_pay_on_date",
+        "promised_date": "2026-03-06"
+      }
+    },
+    {
+      "model": {
+        "confidence": 0.95,
+        "intent": "will_pay_on_date",
+        "promised_date": "2026-03-09",
+        "rationale": "Customer said they will pay by next Monday."
+      },
+      "model_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "rule": {
+        "confidence": 1.0,
+        "intent": "cannot_pay",
+        "promised_date": null,
+        "rationale": "matched 'paise nahi'"
+      },
+      "rule_score": {
+        "date": false,
+        "intent": false,
+        "policy_facts": false
+      },
+      "transcript": "abhi paise nahi hain, agle Monday tak kar deta hun",
+      "truth": {
+        "intent": "will_pay_on_date",
+        "promised_date": "2026-03-09"
+      }
+    },
+    {
+      "model": {
+        "confidence": 0.9,
+        "intent": "will_pay_on_date",
+        "promised_date": "2026-03-03",
+        "rationale": "Customer said they will pay tomorrow."
+      },
+      "model_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "rule": {
+        "confidence": 1.0,
+        "intent": "will_pay_on_date",
+        "promised_date": "2026-03-03",
+        "rationale": "matched 'kar dunga'"
+      },
+      "rule_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "transcript": "kal kar dunga, thoda busy hoon abhi",
+      "truth": {
+        "intent": "will_pay_on_date",
+        "promised_date": "2026-03-03"
+      }
+    },
+    {
+      "model": {
+        "confidence": 0.95,
+        "intent": "will_pay_on_date",
+        "promised_date": "2026-03-04",
+        "rationale": "Customer said they will pay the day after tomorrow (parso)"
+      },
+      "model_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "rule": {
+        "confidence": 1.0,
+        "intent": "will_pay_on_date",
+        "promised_date": "2026-03-04",
+        "rationale": "matched 'kar dunga'"
+      },
+      "rule_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "transcript": "parso pakka pay kar dunga, promise",
+      "truth": {
+        "intent": "will_pay_on_date",
+        "promised_date": "2026-03-04"
+      }
+    },
+    {
+      "model": {
+        "confidence": 0.99,
+        "intent": "will_pay_on_date",
+        "promised_date": "2026-03-14",
+        "rationale": "Customer explicitly states they will pay by 2026-03-14."
+      },
+      "model_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "rule": {
+        "confidence": 1.0,
+        "intent": "opt_out",
+        "promised_date": null,
+        "rationale": "matched 'do not call'"
+      },
+      "rule_score": {
+        "date": false,
+        "intent": false,
+        "policy_facts": false
+      },
+      "transcript": "I will pay by 2026-03-14, please do not call again before that",
+      "truth": {
+        "intent": "will_pay_on_date",
+        "promised_date": "2026-03-14"
+      }
+    },
+    {
+      "model": {
+        "confidence": 0.9,
+        "intent": "will_pay_now",
+        "promised_date": null,
+        "rationale": "Customer says they are doing it right now and wants the link, indicating immediate payment."
+      },
+      "model_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "rule": {
+        "confidence": 1.0,
+        "intent": "will_pay_now",
+        "promised_date": null,
+        "rationale": "matched 'abhi hi'"
+      },
+      "rule_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "transcript": "abhi hi kar raha hoon, link bhej do",
+      "truth": {
+        "intent": "will_pay_now",
+        "promised_date": null
+      }
+    },
+    {
+      "model": {
+        "confidence": 0.95,
+        "intent": "will_pay_now",
+        "promised_date": null,
+        "rationale": "Customer explicitly stated they are paying right now."
+      },
+      "model_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "rule": {
+        "confidence": 1.0,
+        "intent": "will_pay_now",
+        "promised_date": null,
+        "rationale": "matched 'right now'"
+      },
+      "rule_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "transcript": "paying right now on the app",
+      "truth": {
+        "intent": "will_pay_now",
+        "promised_date": null
+      }
+    },
+    {
+      "model": {
+        "confidence": 0.95,
+        "intent": "cannot_pay",
+        "promised_date": null,
+        "rationale": "Customer explicitly said they cannot pay now due to lack of money."
+      },
+      "model_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "rule": {
+        "confidence": 1.0,
+        "intent": "cannot_pay",
+        "promised_date": null,
+        "rationale": "matched 'nahi kar sakta'"
+      },
+      "rule_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "transcript": "sorry yaar, abhi nahi kar sakta, paise nahi hain",
+      "truth": {
+        "intent": "cannot_pay",
+        "promised_date": null
+      }
+    },
+    {
+      "model": {
+        "confidence": 0.95,
+        "intent": "cannot_pay",
+        "promised_date": null,
+        "rationale": "Customer explicitly states they cannot pay this month."
+      },
+      "model_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "rule": {
+        "confidence": 1.0,
+        "intent": "cannot_pay",
+        "promised_date": null,
+        "rationale": "matched 'cannot pay'"
+      },
+      "rule_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "transcript": "I cannot pay this month at all",
+      "truth": {
+        "intent": "cannot_pay",
+        "promised_date": null
+      }
+    },
+    {
+      "model": {
+        "confidence": 0.9,
+        "intent": "disputes_charge",
+        "promised_date": null,
+        "rationale": "Customer says they already paid, indicating a dispute of the charge."
+      },
+      "model_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "rule": {
+        "confidence": 1.0,
+        "intent": "unclear",
+        "promised_date": null,
+        "rationale": "no pattern matched"
+      },
+      "rule_score": {
+        "date": true,
+        "intent": false,
+        "policy_facts": false
+      },
+      "transcript": "maine to already payment kar diya tha, aapke system mein galti hai",
+      "truth": {
+        "intent": "disputes_charge",
+        "promised_date": null
+      }
+    },
+    {
+      "model": {
+        "confidence": 0.9,
+        "intent": "disputes_charge",
+        "promised_date": null,
+        "rationale": "Customer is contesting a charge after canceling subscription."
+      },
+      "model_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "rule": {
+        "confidence": 1.0,
+        "intent": "disputes_charge",
+        "promised_date": null,
+        "rationale": "matched 'why am i being charged'"
+      },
+      "rule_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "transcript": "why am I being charged? I cancelled this subscription",
+      "truth": {
+        "intent": "disputes_charge",
+        "promised_date": null
+      }
+    },
+    {
+      "model": {
+        "confidence": 0.9,
+        "intent": "wrong_number",
+        "promised_date": null,
+        "rationale": "Customer says it's the wrong number and not a subscriber."
+      },
+      "model_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "rule": {
+        "confidence": 1.0,
+        "intent": "wrong_number",
+        "promised_date": null,
+        "rationale": "matched 'galat number'"
+      },
+      "rule_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "transcript": "galat number hai bhai, main koi subscription nahi leta",
+      "truth": {
+        "intent": "wrong_number",
+        "promised_date": null
+      }
+    },
+    {
+      "model": {
+        "confidence": 0.9,
+        "intent": "wrong_number",
+        "promised_date": null,
+        "rationale": "customer says this is not their account"
+      },
+      "model_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "rule": {
+        "confidence": 1.0,
+        "intent": "wrong_number",
+        "promised_date": null,
+        "rationale": "matched 'wrong number'"
+      },
+      "rule_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "transcript": "wrong number, this is not my account",
+      "truth": {
+        "intent": "wrong_number",
+        "promised_date": null
+      }
+    },
+    {
+      "model": {
+        "confidence": 0.9,
+        "intent": "opt_out",
+        "promised_date": null,
+        "rationale": "The customer is asking to stop the calls and not be contacted again."
+      },
+      "model_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "rule": {
+        "confidence": 1.0,
+        "intent": "opt_out",
+        "promised_date": null,
+        "rationale": "matched 'mat karo call'"
+      },
+      "rule_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "transcript": "mat karo call baar baar, band karo ye sab",
+      "truth": {
+        "intent": "opt_out",
+        "promised_date": null
+      }
+    },
+    {
+      "model": {
+        "confidence": 0.95,
+        "intent": "opt_out",
+        "promised_date": null,
+        "rationale": "Customer explicitly requested no further calls and removal of number."
+      },
+      "model_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "rule": {
+        "confidence": 1.0,
+        "intent": "opt_out",
+        "promised_date": null,
+        "rationale": "matched 'do not call'"
+      },
+      "rule_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "transcript": "do not call me again, remove my number",
+      "truth": {
+        "intent": "opt_out",
+        "promised_date": null
+      }
+    },
+    {
+      "model": {
+        "confidence": 0.9,
+        "intent": "no_answer",
+        "promised_date": null,
+        "rationale": "The call was not answered."
+      },
+      "model_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "rule": {
+        "confidence": 1.0,
+        "intent": "no_answer",
+        "promised_date": null,
+        "rationale": "matched '[no answer]'"
+      },
+      "rule_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "transcript": "[no answer]",
+      "truth": {
+        "intent": "no_answer",
+        "promised_date": null
+      }
+    },
+    {
+      "model": {
+        "confidence": 0.9,
+        "intent": "will_pay_on_date",
+        "promised_date": "2026-03-05",
+        "rationale": "Customer said they will pay by Saturday."
+      },
+      "model_score": {
+        "date": false,
+        "intent": true,
+        "policy_facts": false
+      },
+      "rule": {
+        "confidence": 1.0,
+        "intent": "unclear",
+        "promised_date": null,
+        "rationale": "no pattern matched"
+      },
+      "rule_score": {
+        "date": false,
+        "intent": false,
+        "policy_facts": false
+      },
+      "transcript": "thoda time do, shanivar tak dekhta hoon",
+      "truth": {
+        "intent": "will_pay_on_date",
+        "promised_date": "2026-03-07"
+      }
+    },
+    {
+      "model": {
+        "confidence": 0.9,
+        "intent": "will_pay_on_date",
+        "promised_date": "2026-03-05",
+        "rationale": "Customer says they will settle on Thursday, which is 2026-03-05."
+      },
+      "model_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "rule": {
+        "confidence": 1.0,
+        "intent": "will_pay_on_date",
+        "promised_date": "2026-03-05",
+        "rationale": "matched 'kar dunga'"
+      },
+      "rule_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "transcript": "guruvar ko pension aati hai, us din settle kar dunga",
+      "truth": {
+        "intent": "will_pay_on_date",
+        "promised_date": "2026-03-05"
+      }
+    },
+    {
+      "model": {
+        "confidence": 0.9,
+        "intent": "cannot_pay",
+        "promised_date": null,
+        "rationale": "Customer says they cannot pay this week."
+      },
+      "model_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "rule": {
+        "confidence": 1.0,
+        "intent": "unclear",
+        "promised_date": null,
+        "rationale": "no pattern matched"
+      },
+      "rule_score": {
+        "date": true,
+        "intent": false,
+        "policy_facts": false
+      },
+      "transcript": "EMI ke baad hi kuch ho payega, is hafte nahi",
+      "truth": {
+        "intent": "cannot_pay",
+        "promised_date": null
+      }
+    },
+    {
+      "model": {
+        "confidence": 0.9,
+        "intent": "unclear",
+        "promised_date": null,
+        "rationale": "Customer is asking about account closure, not about payment."
+      },
+      "model_score": {
+        "date": true,
+        "intent": false,
+        "policy_facts": false
+      },
+      "rule": {
+        "confidence": 1.0,
+        "intent": "unclear",
+        "promised_date": null,
+        "rationale": "no pattern matched"
+      },
+      "rule_score": {
+        "date": true,
+        "intent": false,
+        "policy_facts": false
+      },
+      "transcript": "mera account to band ho chuka hai kab ka",
+      "truth": {
+        "intent": "disputes_charge",
+        "promised_date": null
+      }
+    },
+    {
+      "model": {
+        "confidence": 0.95,
+        "intent": "wrong_number",
+        "promised_date": null,
+        "rationale": "Caller identifies as a driver, not the customer."
+      },
+      "model_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "rule": {
+        "confidence": 1.0,
+        "intent": "unclear",
+        "promised_date": null,
+        "rationale": "no pattern matched"
+      },
+      "rule_score": {
+        "date": true,
+        "intent": false,
+        "policy_facts": false
+      },
+      "transcript": "bhaiya main to driver hoon, sahab ka phone hai ye",
+      "truth": {
+        "intent": "wrong_number",
+        "promised_date": null
+      }
+    },
+    {
+      "model": {
+        "confidence": 0.95,
+        "intent": "opt_out",
+        "promised_date": null,
+        "rationale": "Customer explicitly requested no further calls."
+      },
+      "model_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "rule": {
+        "confidence": 1.0,
+        "intent": "unclear",
+        "promised_date": null,
+        "rationale": "no pattern matched"
+      },
+      "rule_score": {
+        "date": true,
+        "intent": false,
+        "policy_facts": false
+      },
+      "transcript": "dobara phone mat karna, samajh aaya?",
+      "truth": {
+        "intent": "opt_out",
+        "promised_date": null
+      }
+    },
+    {
+      "model": {
+        "confidence": 0.8,
+        "intent": "unclear",
+        "promised_date": null,
+        "rationale": "Customer only said they cannot say anything right now, no payment plan or refusal given."
+      },
+      "model_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "rule": {
+        "confidence": 1.0,
+        "intent": "unclear",
+        "promised_date": null,
+        "rationale": "no pattern matched"
+      },
+      "rule_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "transcript": "dekhta hoon, abhi kuch keh nahi sakta",
+      "truth": {
+        "intent": "unclear",
+        "promised_date": null
+      }
+    },
+    {
+      "model": {
+        "confidence": 0.6,
+        "intent": "unclear",
+        "promised_date": null,
+        "rationale": "The customer only said \"theek hai\" with no payment or date information."
+      },
+      "model_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "rule": {
+        "confidence": 1.0,
+        "intent": "unclear",
+        "promised_date": null,
+        "rationale": "no pattern matched"
+      },
+      "rule_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "transcript": "hmm... theek hai",
+      "truth": {
+        "intent": "unclear",
+        "promised_date": null
+      }
+    },
+    {
+      "model": {
+        "confidence": 0.95,
+        "intent": "unclear",
+        "promised_date": null,
+        "rationale": "Customer is requesting a new card, not a payment intent."
+      },
+      "model_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "rule": {
+        "confidence": 1.0,
+        "intent": "unclear",
+        "promised_date": null,
+        "rationale": "no pattern matched"
+      },
+      "rule_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "transcript": "arre wo card to maine block karwa diya tha, naya bhejo",
+      "truth": {
+        "intent": "unclear",
+        "promised_date": null
+      }
+    },
+    {
+      "model": {
+        "confidence": 0.9,
+        "intent": "will_pay_on_date",
+        "promised_date": "2026-03-04",
+        "rationale": "They said they will check/pay by the day after tomorrow."
+      },
+      "model_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "rule": {
+        "confidence": 1.0,
+        "intent": "unclear",
+        "promised_date": null,
+        "rationale": "no pattern matched"
+      },
+      "rule_score": {
+        "date": false,
+        "intent": false,
+        "policy_facts": false
+      },
+      "transcript": "kal tak nahi ho payega, parso tak dekhta hoon",
+      "truth": {
+        "intent": "will_pay_on_date",
+        "promised_date": "2026-03-04"
+      }
+    },
+    {
+      "model": {
+        "confidence": 0.95,
+        "intent": "will_pay_on_date",
+        "promised_date": "2026-03-03",
+        "rationale": "Customer explicitly said they will pay on Tuesday morning."
+      },
+      "model_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "rule": {
+        "confidence": 1.0,
+        "intent": "unclear",
+        "promised_date": null,
+        "rationale": "no pattern matched"
+      },
+      "rule_score": {
+        "date": false,
+        "intent": false,
+        "policy_facts": false
+      },
+      "transcript": "tuesday morning first thing, pakka",
+      "truth": {
+        "intent": "will_pay_on_date",
+        "promised_date": "2026-03-03"
+      }
+    },
+    {
+      "model": {
+        "confidence": 0.8,
+        "intent": "unclear",
+        "promised_date": null,
+        "rationale": "Customer did not mention any payment plan or date."
+      },
+      "model_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "rule": {
+        "confidence": 1.0,
+        "intent": "unclear",
+        "promised_date": null,
+        "rationale": "no pattern matched"
+      },
+      "rule_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "transcript": "main abhi office mein hoon, baad mein baat karte hain",
+      "truth": {
+        "intent": "unclear",
+        "promised_date": null
+      }
+    },
+    {
+      "model": {
+        "confidence": 0.9,
+        "intent": "cannot_pay",
+        "promised_date": null,
+        "rationale": "Customer says they have no money, indicating inability to pay."
+      },
+      "model_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "rule": {
+        "confidence": 1.0,
+        "intent": "unclear",
+        "promised_date": null,
+        "rationale": "no pattern matched"
+      },
+      "rule_score": {
+        "date": true,
+        "intent": false,
+        "policy_facts": false
+      },
+      "transcript": "paise hain hi nahi, kahan se dun",
+      "truth": {
+        "intent": "cannot_pay",
+        "promised_date": null
+      }
+    },
+    {
+      "model": {
+        "confidence": 0.9,
+        "intent": "disputes_charge",
+        "promised_date": null,
+        "rationale": "Customer is disputing the charge and threatening to go to consumer court."
+      },
+      "model_score": {
+        "date": true,
+        "intent": true,
+        "policy_facts": true
+      },
+      "rule": {
+        "confidence": 1.0,
+        "intent": "unclear",
+        "promised_date": null,
+        "rationale": "no pattern matched"
+      },
+      "rule_score": {
+        "date": true,
+        "intent": false,
+        "policy_facts": false
+      },
+      "transcript": "aap log fraud ho, main consumer court jaunga",
+      "truth": {
+        "intent": "disputes_charge",
+        "promised_date": null
+      }
+    }
+  ]
+}

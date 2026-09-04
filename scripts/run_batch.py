@@ -40,7 +40,48 @@ SUCCESS_PROBABILITY: dict[tuple[str, str], list[float]] = {
     ("issuer_declined", "SEND_UPDATE_LINK"): [0.35, 0.25, 0.25],
     ("authentication_failed", "SEND_UPDATE_LINK"): [0.45, 0.25, 0.25],
     ("invalid_payment_method", "SEND_UPDATE_LINK"): [0.30, 0.20, 0.20],
+    # Voice at rung 3. Higher than a third silent message would be — a call is answered
+    # or it is not, and an answered one can take a dated promise — and deliberately NOT
+    # equal to config.P_RECOVER_PRIOR's voice rows, which are the agent's beliefs. If
+    # the two tables agreed, every EV would be correct by construction and the whole
+    # measurement would be circular. tests/test_economics.py asserts they differ.
+    # Every one of these sits BELOW the matching config.P_RECOVER_PRIOR row: the agent
+    # is deliberately a little optimistic about the rung it just gained. That is the
+    # realistic direction for a new channel nobody has data on yet, and it gives the
+    # calibration table something to find rather than a set of priors that were right
+    # by construction.
+    ("card_expired", "VOICE_CALL"): [0.30, 0.30, 0.30],
+    ("issuer_declined", "VOICE_CALL"): [0.27, 0.27, 0.27],
+    ("authentication_failed", "VOICE_CALL"): [0.33, 0.33, 0.33],
+    ("insufficient_funds", "VOICE_CALL"): [0.35, 0.35, 0.35],
 }
+
+# What a customer says when a voice call is answered. Hinglish, because that is the
+# register an Indian dunning call is actually conducted in, and because it is the exact
+# input a keyword rule struggles with and a model might not — which is the point of the
+# ablation in scripts/ablate_inbound.py.
+#
+# Weighted, and drawn from the SAME seeded stream as every other decision in the batch,
+# so the transcripts are reproducible like anything else. They are MODELLING
+# ASSUMPTIONS about what people say, not recordings.
+VOICE_TRANSCRIPTS: tuple[tuple[int, str], ...] = (
+    (14, "haan bhai, salary aane ke baad Friday ko kar dunga"),
+    (10, "abhi paise nahi hain, agle Monday tak kar deta hun"),
+    (8, "kal kar dunga, thoda busy hoon abhi"),
+    (7, "parso pakka pay kar dunga, promise"),
+    (6, "I will pay by 2026-03-14, please do not call again before that"),
+    (6, "abhi hi kar raha hoon, link bhej do"),
+    (5, "paying right now on the app"),
+    (7, "sorry yaar, abhi nahi kar sakta, paise nahi hain"),
+    (5, "I cannot pay this month at all"),
+    (5, "maine to already payment kar diya tha, aapke system mein galti hai"),
+    (4, "why am I being charged? I cancelled this subscription"),
+    (4, "galat number hai bhai, main koi subscription nahi leta"),
+    (3, "wrong number, this is not my account"),
+    (4, "mat karo call baar baar, band karo ye sab"),
+    (3, "do not call me again, remove my number"),
+    (9, "[no answer]"),
+)
 DEFAULT_FOLLOWUP_HOURS = 24  # next dunning cycle after an unanswered contact
 RETRY_RESULT_HOURS = 1       # a silent re-charge resolves quickly
 
@@ -87,7 +128,20 @@ class Runner:
         # recovered treated case cannot be told apart from a self-cured one after the
         # fact, so the count has to be taken where the coin is actually flipped.
         self.self_cure_rolls: dict[str, list[int]] = {"treated": [0, 0], "control": [0, 0]}
+        self.transcripts: dict[str, str] = {}          # case_id -> what was said
+        self._transcript_pool = [t for _, t in VOICE_TRANSCRIPTS]
+        self._transcript_weights = [w for w, _ in VOICE_TRANSCRIPTS]
+        executor.set_transcript_provider(self.transcript_for)
         executor.set_live_link_budget(live_links)
+
+    # ------------------------------------------------------------------- voice
+    def transcript_for(self, case: dict[str, Any]) -> str:
+        """What the customer said on this call. Drawn once per case from the seeded
+        stream, so a replay hears the same thing."""
+        if case["id"] not in self.transcripts:
+            self.transcripts[case["id"]] = self.rng.choices(
+                self._transcript_pool, weights=self._transcript_weights, k=1)[0]
+        return self.transcripts[case["id"]]
 
     # ------------------------------------------------------------- utilities
     def _sub_id(self, case: dict[str, Any]) -> str:
@@ -273,6 +327,19 @@ class Runner:
                     when = executed_at + timedelta(
                         hours=self.rng.randint(12, config.PROMISE_WINDOW_HOURS - 1))
                     event_type = "payment_link.paid"
+                elif record["action"] == "VOICE_CALL":
+                    # A customer who named a day and then paid, pays ON that day. This is
+                    # what makes `promises_kept` mean something: without it the promise
+                    # date would be decorative and every kept promise would be luck.
+                    promise = case_store.open_promise(case["id"])
+                    if promise is not None:
+                        when = clock.parse_iso(promise["due_at"]) - timedelta(hours=2)
+                        if when <= executed_at:
+                            when = executed_at + timedelta(hours=1)
+                    else:
+                        when = executed_at + timedelta(
+                            hours=self.rng.randint(2, config.PROMISE_WINDOW_HOURS - 1))
+                    event_type = "payment_link.paid"
                 else:
                     when = executed_at + timedelta(hours=self.rng.randint(2, 48))
                     event_type = "payment_link.paid"
@@ -424,14 +491,14 @@ def acceptance_checks(runner: Optional["Runner"] = None) -> list[tuple[str, bool
 
     bad = db.query(
         "SELECT e.id AS id FROM execution_record e JOIN recovery_case c ON c.id = e.case_id"
-        " WHERE c.status = 'stopped_unknown' AND e.action IN ('SEND_UPDATE_LINK','PROMISE_TO_PAY')"
+        f" WHERE c.status = 'stopped_unknown' AND e.action IN {config.CONTACT_ACTIONS_SQL}"
     )
     check("I4: unknown cases have zero contact executions", not bad, ", ".join(r["id"] for r in bad))
 
     violations = []
     rows = db.query(
         "SELECT case_id, executed_at FROM execution_record"
-        " WHERE action IN ('SEND_UPDATE_LINK','PROMISE_TO_PAY') ORDER BY case_id, executed_at"
+        f" WHERE action IN {config.CONTACT_ACTIONS_SQL} ORDER BY case_id, executed_at"
     )
     last: dict[str, Any] = {}
     for r in rows:
@@ -476,7 +543,7 @@ def acceptance_checks(runner: Optional["Runner"] = None) -> list[tuple[str, bool
     # not a restatement of what the gate believes about itself.
     nightly = []
     for r in db.query("SELECT id, executed_at FROM execution_record"
-                      " WHERE action IN ('SEND_UPDATE_LINK','PROMISE_TO_PAY')"):
+                      f" WHERE action IN {config.CONTACT_ACTIONS_SQL}"):
         if clock.in_quiet_hours(clock.parse_iso(r["executed_at"])):
             nightly.append(f"{r['id']} @ {clock.to_ist(clock.parse_iso(r['executed_at'])):%H:%M} IST")
     check(f"I5: no contact sent between {config.QUIET_HOURS_START_IST}:00 and "
@@ -491,20 +558,31 @@ def acceptance_checks(runner: Optional["Runner"] = None) -> list[tuple[str, bool
     over = db.query(
         "SELECT c.customer_id AS customer_id, COUNT(*) AS n FROM execution_record e"
         " JOIN recovery_case c ON c.id = e.case_id"
-        " WHERE e.action IN ('SEND_UPDATE_LINK','PROMISE_TO_PAY')"
+        f" WHERE e.action IN {config.CONTACT_ACTIONS_SQL}"
         " GROUP BY c.customer_id, substr(e.executed_at, 1, 10)"
         f" HAVING n > {config.MAX_CONTACTS_PER_CUSTOMER_PER_DAY}")
     check(f"I7: no customer received more than {config.MAX_CONTACTS_PER_CUSTOMER_PER_DAY} "
           "contacts in a day", not over,
           ", ".join(f"{r['customer_id']}x{r['n']}" for r in over))
 
-    # E1. Every executed intervention cleared its own economics before it ran.
-    bad = db.query(
-        "SELECT d.id AS id, d.ev_paise AS ev FROM intervention_decision d"
+    # E1. Every executed intervention cleared its own economics before it ran — which
+    # means it BEAT ITS ALTERNATIVE, not that its EV was positive. At the final rung the
+    # alternative is the human queue at -Rs 40, so a voice call worth -Rs 29 is the
+    # cheaper of the two available options and correctly proceeds. Asserting positivity
+    # here would have quietly required every last-rung action to be better than doing
+    # nothing, when doing nothing is not on the menu.
+    bad = []
+    for r in db.query(
+        "SELECT d.id AS id, d.ev_paise AS ev, d.ev_detail AS detail FROM intervention_decision d"
         " JOIN execution_record e ON e.decision_id = d.id"
-        " WHERE d.ev_paise IS NULL OR d.ev_paise <= 0")
-    check("E1: every executed intervention had a positive expected value", not bad,
-          ", ".join(f"{r['id']}({r['ev']})" for r in bad))
+    ):
+        try:
+            detail = json.loads(r["detail"] or "{}")
+        except (TypeError, ValueError):
+            detail = {}
+        if r["ev"] is None or int(r["ev"]) <= int(detail.get("alternative_ev_paise", 0)):
+            bad.append(f"{r['id']}(ev={r['ev']} vs alt={detail.get('alternative_ev_paise')})")
+    check("E1: every executed intervention beat its alternative", not bad, ", ".join(bad))
 
     chain = audit.verify()
     check("audit hash chain is intact",
@@ -523,8 +601,8 @@ def acceptance_checks(runner: Optional["Runner"] = None) -> list[tuple[str, bool
           ", ".join(fences["outreach_to_settled_case_ids"]))
     check("fencing: every contact dispatch passed a pre-dispatch fence",
           fences["n_dispatches_fenced"] >= int(db.scalar(
-              "SELECT COUNT(*) FROM execution_record WHERE action IN"
-              " ('SEND_UPDATE_LINK','PROMISE_TO_PAY','VOICE_CALL')", (), 0)),
+              f"SELECT COUNT(*) FROM execution_record WHERE action IN "
+              f"{config.CONTACT_ACTIONS_SQL}", (), 0)),
           f"{fences['n_dispatches_fenced']} pre-dispatch fences recorded")
 
     rec = metrics.reconciliation()
@@ -615,6 +693,15 @@ def print_summary(runner: Runner, accuracy: dict[str, Any]) -> None:
           f"({llm['classified_to_unknown']} of those collapsed to unknown)")
     print(f"  copy: {llm['drafted']} model drafts accepted, {llm['fallback_to_template']} static templates")
     print(f"  executions: {s['execution_modes']}")
+    by_action = s.get("executions_by_action") or {}
+    print("  by action:  " + ", ".join(f"{a} {n}" for a, n in by_action.items() if n))
+    pr = s.get("promises") or {}
+    if pr.get("n_promises"):
+        kept = "-" if pr["kept_rate"] is None else f"{pr['kept_rate'] * 100:.0f}%"
+        print(f"  promises:   {pr['n_promises']} dated promises the customer NAMED — "
+              f"{pr['promises_kept']} kept, {pr['promises_broken']} broken, "
+              f"{pr['promises_open']} open  (kept rate {kept})")
+        print(f"    read by:  {pr['by_reading_source']}")
     acc = accuracy["by_method"]
     for method in ("rule", "llm"):
         b = acc[method]
@@ -670,6 +757,11 @@ def main() -> int:
                          "can be reported as incremental rather than gross (default 0.0 = no "
                          "control arm, which reproduces the frozen batch exactly)")
     ap.add_argument("--keep", action="store_true", help="append to an existing database instead of resetting it")
+    ap.add_argument("--no-voice", action="store_true",
+                    help="disable the voice rung: attempt 3 reverts to STOP_HANDOFF for every "
+                         "category that would otherwise call. This is the counterfactual arm for "
+                         "task 3.10 — run it against an identical seed and the difference in "
+                         "incremental recovery is what the rung is worth.")
     args = ap.parse_args()
 
     data = json.loads(Path(args.cases).read_text(encoding="utf-8"))
@@ -697,6 +789,20 @@ def main() -> int:
     if not 0.0 <= args.holdout < 1.0:
         print("--holdout must be in [0.0, 1.0)")
         return 2
+    if args.no_voice:
+        # Mutating the policy table is exactly the kind of thing this project otherwise
+        # refuses to do — the bounds of the agent are source code, not configuration.
+        # It is allowed here, loudly, because the whole purpose of this flag is to run
+        # the agent as it was BEFORE the rung existed, and reverting the three cells is
+        # a more honest counterfactual than maintaining a second copy of the table.
+        reverted = []
+        for key, (action, delay) in list(config.POLICY.items()):
+            if action == "VOICE_CALL":
+                config.POLICY[key] = ("STOP_HANDOFF", delay)
+                reverted.append(f"{key[0]}/{key[1]}")
+        print(f"--no-voice: reverted {len(reverted)} policy cells to STOP_HANDOFF "
+              f"({', '.join(reverted)})")
+
     runner = Runner(data, random.Random(seed), args.live_links, args.holdout)
     print(f"running {len(data['cases'])} synthetic cases on a simulated clock from "
           f"{clock.now_iso()} (seed {seed}, live links {args.live_links}, "

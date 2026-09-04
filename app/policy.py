@@ -104,6 +104,27 @@ def decide(case: dict[str, Any]) -> Optional[dict[str, Any]]:
     # leaves no half-made decision behind — the same shape as an invariant stop.
     ev = economics.evaluate(case, action, attempt)
     if ev["verdict"] == "stop_uneconomic":
+        # WHERE a refused case goes depends on what the alternative was. If the gate
+        # weighed this action against the human queue and the queue won, the case must
+        # actually reach the queue — closing it as `uneconomic` would take the Rs 40 out
+        # of the comparison after using it to win the comparison, and quietly abandon a
+        # case the arithmetic said was worth a person.
+        alternative = ev.get("alternative_action")
+        if alternative == "STOP_HANDOFF":
+            cases.transition(
+                case["id"], "stopped_handoff",
+                summary=(f"Policy row {category}/{attempt} chose {action}, but at "
+                         f"{ev['ev_paise']} paise it is worth less than the human queue at "
+                         f"{ev['alternative_ev_paise']} paise: handed off to a person instead"),
+                detail={
+                    "gate": "E1",
+                    "policy_row_ref": f"{category}/{attempt}",
+                    "withheld_action": action,
+                    "chosen_alternative": alternative,
+                    "ev": ev,
+                },
+            )
+            return None
         cases.transition(
             case["id"], "stopped_uneconomic",
             summary=(f"Policy row {category}/{attempt} chose {action}, but its expected value "

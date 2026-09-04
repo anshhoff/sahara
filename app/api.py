@@ -76,6 +76,12 @@ _INVARIANT_PLAIN = {
            "A customer has a daily contact ceiling across all of their cases, and the "
            "system as a whole has a daily outreach spend ceiling. Either one defers "
            "the contact to the next morning rather than dropping it."),
+    "I8": ("Never dial a number nobody verified",
+           "A real phone call may only reach a number on an explicit allowlist. This is "
+           "the one rule that fails CLOSED on absence: the others ask whether there is a "
+           "reason to stop, this one asks whether there is a reason to proceed and "
+           "refuses when there is not. Synthetic customers have no phone number "
+           "anywhere in this system, so they cannot be dialled by construction."),
 }
 
 # Gate E1 is described here alongside the invariants because the dashboard shows them
@@ -109,6 +115,7 @@ def mechanism() -> dict[str, Any]:
         "I3": stops.get("stopped_opt_out", 0),
         "I4": stops.get("stopped_unknown", 0),
         "I6": stops.get("stopped_suppressed", 0),
+        "I8": stops.get("stopped_unverified_recipient", 0),
     }
     for code in ("I2", "I5", "I7"):
         stop_for[code] = int(db.scalar(
@@ -119,14 +126,15 @@ def mechanism() -> dict[str, Any]:
         (f"%deferred by {code}:%",), 0)) for code in ("I2", "I5", "I7")}
 
     invariants_out = []
-    for code in ("I1", "I2", "I3", "I4", "I5", "I6", "I7"):
+    for code in ("I1", "I2", "I3", "I4", "I5", "I6", "I7", "I8"):
         title, plain = _INVARIANT_PLAIN[code]
         invariants_out.append({
             "code": code,
             "title": title,
             "rule": invariants.INVARIANT_TEXT[code],
             "plain": plain,
-            "kind": "safety" if code in ("I1", "I2", "I3", "I4") else "contact_hygiene",
+            "kind": ("safety" if code in ("I1", "I2", "I3", "I4")
+                     else "transmission" if code == "I8" else "contact_hygiene"),
             "stops": stop_for[code],
             "defers": defers.get(code, 0),
         })
@@ -168,10 +176,12 @@ def mechanism() -> dict[str, Any]:
             "decisions": int(db.scalar("SELECT COUNT(*) FROM intervention_decision", (), 0)),
             "blocked": int(db.scalar(
                 "SELECT COUNT(*) FROM intervention_decision WHERE status = 'blocked_by_invariant'", (), 0)),
+            "fenced": int(db.scalar(
+                "SELECT COUNT(*) FROM intervention_decision WHERE status = 'blocked_by_fence'", (), 0)),
             "executions": int(db.scalar("SELECT COUNT(*) FROM execution_record", (), 0)),
             "contacts": int(db.scalar(
-                "SELECT COUNT(*) FROM execution_record WHERE action IN"
-                " ('SEND_UPDATE_LINK','PROMISE_TO_PAY')", (), 0)),
+                f"SELECT COUNT(*) FROM execution_record WHERE action IN "
+                f"{config.CONTACT_ACTIONS_SQL}", (), 0)),
             "recovered": int(db.scalar(
                 "SELECT COUNT(*) FROM recovery_case WHERE status = 'recovered'", (), 0)),
         },
@@ -270,6 +280,12 @@ def get_case(case_id: str) -> dict[str, Any]:
             "episode_window_days": config.EPISODE_WINDOW_DAYS,
         },
     }
+
+
+@router.get("/promises")
+def promise_stats() -> dict[str, Any]:
+    """Dated promises the customer actually made, and whether they held."""
+    return metrics.promises()
 
 
 @router.get("/fencing")

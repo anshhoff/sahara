@@ -61,6 +61,25 @@ QUIET_HOURS_ENABLED = _env_bool("QUIET_HOURS_ENABLED", True)
 MAX_CONTACTS_PER_CUSTOMER_PER_DAY = 2
 DAILY_OUTREACH_BUDGET_PAISE = int(_env("DAILY_OUTREACH_BUDGET_PAISE", "500000"))  # Rs 5,000
 
+# ------------------------------------------------- I8, verified recipients
+# The allowlist for a REAL outbound transmission. Empty by default, which is the
+# safe default: with nothing on the list, nothing can be dialled.
+#
+# This is deliberately an env var of E.164 numbers and not a database table. A
+# database row can be written by any code path that can write rows, including a future
+# one nobody has reviewed; an env var is set by the operator of the process, once,
+# outside the application. The bound of the agent should be harder to change than the
+# agent.
+VERIFIED_RECIPIENTS = frozenset(
+    n.strip() for n in _env("VERIFIED_RECIPIENTS", "").split(",") if n.strip()
+)
+
+# Real transmission is OFF unless explicitly switched on. Everything in the batch and
+# the test suite runs with this false, which is why I8 is a structural boundary rather
+# than a caveat: with no real-send path enabled there is nothing to allowlist against,
+# and with it enabled a synthetic customer has no verified number to match.
+VOICE_REAL_SEND_ENABLED = _env_bool("VOICE_REAL_SEND_ENABLED", False)
+
 # --------------------------------------------------------------------- enums
 CATEGORIES = (
     "card_expired",
@@ -70,12 +89,26 @@ CATEGORIES = (
     "invalid_payment_method",
     "unknown",
 )
-ACTIONS = ("RETRY_LATER", "SEND_UPDATE_LINK", "PROMISE_TO_PAY", "STOP_HANDOFF")
+# VOICE_CALL is registered as an ACTION, not as a channel on an existing action, and
+# that is the entire design argument. Every guardrail in invariants.py keys off
+# CONTACT_ACTIONS and ACTION_COST_PAISE; adding voice as a member of those sets makes
+# it inherit I2's cooldown, I5's quiet hours, I6's suppression, I7's ceilings and
+# annoyance pricing with ZERO new guardrail code. A "channel" flag on SEND_UPDATE_LINK
+# would have needed each of those gates taught about it separately, and the one that
+# got forgotten would be the one that called somebody at 2am.
+ACTIONS = ("RETRY_LATER", "SEND_UPDATE_LINK", "PROMISE_TO_PAY", "VOICE_CALL", "STOP_HANDOFF")
 
 # Actions that put a message in front of a human being. RETRY_LATER is a silent
 # re-charge of an existing mandate, not a contact, so the cooldown (I2) does not
 # apply to it — a deliberate and defensible compliance distinction (docs/04 §5).
-CONTACT_ACTIONS = frozenset({"SEND_UPDATE_LINK", "PROMISE_TO_PAY"})
+CONTACT_ACTIONS = frozenset({"SEND_UPDATE_LINK", "PROMISE_TO_PAY", "VOICE_CALL"})
+
+# The same set as a SQL literal, DERIVED rather than retyped. Half a dozen queries —
+# I7's daily count, the I2/I5/I7 acceptance checks, the fencing breach query — used to
+# spell the tuple out by hand, which meant adding VOICE_CALL to CONTACT_ACTIONS made
+# it inherit the gates in Python while every SQL query quietly went on ignoring it.
+# A set that can drift from its own SQL is a set with two definitions.
+CONTACT_ACTIONS_SQL = "(" + ", ".join(f"'{a}'" for a in sorted(CONTACT_ACTIONS)) + ")"
 
 CASE_STATUSES = (
     "open",
@@ -187,7 +220,7 @@ RULE_R7 = "R7"  # all error fields empty/null -> unknown, without troubling the 
 POLICY: dict[tuple[str, int], tuple[str, int]] = {
     ("card_expired", 1): ("SEND_UPDATE_LINK", 0),
     ("card_expired", 2): ("SEND_UPDATE_LINK", 0),   # reminder; I2 defers it past cooldown
-    ("card_expired", 3): ("STOP_HANDOFF", 0),
+    ("card_expired", 3): ("VOICE_CALL", 0),         # was STOP_HANDOFF; see the note below
 
     ("insufficient_funds", 1): ("RETRY_LATER", 24),
     ("insufficient_funds", 2): ("RETRY_LATER", 72),  # salary-cycle spacing
@@ -195,15 +228,25 @@ POLICY: dict[tuple[str, int], tuple[str, int]] = {
 
     ("issuer_declined", 1): ("RETRY_LATER", 12),     # transient declines clear
     ("issuer_declined", 2): ("SEND_UPDATE_LINK", 0),
-    ("issuer_declined", 3): ("STOP_HANDOFF", 0),
+    ("issuer_declined", 3): ("VOICE_CALL", 0),
 
     ("authentication_failed", 1): ("SEND_UPDATE_LINK", 0),  # fresh auth link
     ("authentication_failed", 2): ("SEND_UPDATE_LINK", 0),
-    ("authentication_failed", 3): ("STOP_HANDOFF", 0),
+    ("authentication_failed", 3): ("VOICE_CALL", 0),
 
     ("invalid_payment_method", 1): ("SEND_UPDATE_LINK", 0),
     ("invalid_payment_method", 2): ("STOP_HANDOFF", 0),
     ("invalid_payment_method", 3): ("STOP_HANDOFF", 0),  # unreachable; keeps the table total
+
+    # Voice SUBSTITUTES at attempt 3; it is not an added fourth rung. Before this,
+    # card_expired, issuer_declined and authentication_failed all jumped straight from
+    # a silent link to occupying a person at Rs 40. Voice fills that rung at Rs 25, and
+    # a call that goes unanswered or whose promise lapses still closes the case as
+    # `stopped_handoff` — so the human queue remains the floor, not the third step.
+    #
+    # MAX_ATTEMPTS stays 3 and I1 is untouched. STOP_HANDOFF was never an intervention:
+    # it is in economics.NON_INTERVENTION_ACTIONS and never consumed an attempt slot, so
+    # there was a free rung here all along.
 
     # Defence in depth only: I4 stops an `unknown` case before the policy is consulted.
     ("unknown", 1): ("STOP_HANDOFF", 0),
@@ -283,6 +326,101 @@ STATIC_TEMPLATES: dict[tuple[str, str], str] = {
         f"here: {_LINK}",
 }
 
+# ------------------------------------------------------------ voice templates
+# A voice call is an outbound string like any other, so it goes through the identical
+# validator: the synthetic disclosure, exactly one {LINK}, no typed digit anywhere, no
+# forbidden word, and the same length ceiling. Registering the language variants here
+# rather than composing them at call time is what puts them behind that gate — an
+# unregistered variant cannot be spoken, and tests/test_copy_validation.py fails the
+# build if any registered one would not pass.
+#
+# The digit rule holds across scripts: Python's \d matches Devanagari ०-९ as well as
+# ASCII, so a Hindi draft cannot smuggle in an amount either.
+#
+# Hinglish is romanised Hindi, not a third language — it is what an Indian customer
+# service call actually sounds like, and it is the register in which someone says
+# "salary aane ke baad Friday ko kar dunga".
+VOICE_LANGUAGES = ("en", "hi", "hi_en")
+VOICE_DEFAULT_LANGUAGE = "hi_en"
+
+_CALL_EN = f"{_D} Automated call from {{MERCHANT}}."
+_CALL_HI = f"{_D} {{MERCHANT}} की ओर से स्वचालित कॉल।"
+_CALL_HE = f"{_D} {{MERCHANT}} ki taraf se automated call."
+
+VOICE_TEMPLATES: dict[tuple[str, str], str] = {
+    ("card_expired", "en"):
+        f"{_CALL_EN} Your subscription payment of Rs {{AMOUNT}} could not be collected "
+        f"because the card on file has expired. Please add a current card here: {_LINK}",
+    ("card_expired", "hi"):
+        f"{_CALL_HI} आपके सब्सक्रिप्शन का Rs {{AMOUNT}} का भुगतान नहीं हो सका, क्योंकि कार्ड की "
+        f"वैधता समाप्त हो चुकी है। कृपया नया कार्ड यहाँ जोड़ें: {_LINK}",
+    ("card_expired", "hi_en"):
+        f"{_CALL_HE} Aapke subscription ka Rs {{AMOUNT}} ka payment nahi ho paya kyunki "
+        f"card expire ho chuka hai. Naya card yahan add karein: {_LINK}",
+
+    ("insufficient_funds", "en"):
+        f"{_CALL_EN} We could not collect Rs {{AMOUNT}} for your subscription. Tell us "
+        f"when you can pay, or settle it here: {_LINK}",
+    ("insufficient_funds", "hi"):
+        f"{_CALL_HI} आपके सब्सक्रिप्शन के लिए Rs {{AMOUNT}} नहीं लिए जा सके। बताइए आप कब भुगतान "
+        f"कर सकते हैं, या यहाँ भुगतान करें: {_LINK}",
+    ("insufficient_funds", "hi_en"):
+        f"{_CALL_HE} Aapke subscription ke liye Rs {{AMOUNT}} collect nahi ho paye. Bataiye "
+        f"aap kab pay kar sakte hain, ya yahan pay karein: {_LINK}",
+
+    ("issuer_declined", "en"):
+        f"{_CALL_EN} Your bank declined the subscription charge of Rs {{AMOUNT}}. You can "
+        f"complete the payment or use another method here: {_LINK}",
+    ("issuer_declined", "hi"):
+        f"{_CALL_HI} आपके बैंक ने Rs {{AMOUNT}} का सब्सक्रिप्शन शुल्क अस्वीकार कर दिया। आप यहाँ "
+        f"भुगतान पूरा कर सकते हैं या दूसरा तरीका चुन सकते हैं: {_LINK}",
+    ("issuer_declined", "hi_en"):
+        f"{_CALL_HE} Aapke bank ne Rs {{AMOUNT}} ka subscription charge decline kar diya. "
+        f"Yahan payment complete karein ya doosra method chunein: {_LINK}",
+
+    ("authentication_failed", "en"):
+        f"{_CALL_EN} The authentication for your subscription payment of Rs {{AMOUNT}} did "
+        f"not complete. Here is a fresh secure link: {_LINK}",
+    ("authentication_failed", "hi"):
+        f"{_CALL_HI} आपके Rs {{AMOUNT}} के सब्सक्रिप्शन भुगतान का प्रमाणीकरण पूरा नहीं हुआ। यह "
+        f"नया सुरक्षित लिंक है: {_LINK}",
+    ("authentication_failed", "hi_en"):
+        f"{_CALL_HE} Aapke Rs {{AMOUNT}} ke subscription payment ka authentication complete "
+        f"nahi hua. Yeh naya secure link hai: {_LINK}",
+
+    ("invalid_payment_method", "en"):
+        f"{_CALL_EN} The payment method saved for your subscription is no longer usable, so "
+        f"Rs {{AMOUNT}} could not be collected. Add a new one here: {_LINK}",
+    ("invalid_payment_method", "hi"):
+        f"{_CALL_HI} आपके सब्सक्रिप्शन में सहेजा गया भुगतान तरीका अब काम नहीं करता, इसलिए "
+        f"Rs {{AMOUNT}} नहीं लिए जा सके। नया तरीका यहाँ जोड़ें: {_LINK}",
+    ("invalid_payment_method", "hi_en"):
+        f"{_CALL_HE} Aapke subscription ka saved payment method ab kaam nahi karta, isliye "
+        f"Rs {{AMOUNT}} collect nahi ho paye. Naya method yahan add karein: {_LINK}",
+
+    # `unknown` never reaches a contact action — I4 stops the case before the policy is
+    # consulted. Registered anyway so the table is TOTAL over the six categories, for
+    # the same reason POLICY is: a lookup that can fall through to a default is a
+    # lookup that will, on the one input nobody thought about.
+    ("unknown", "en"):
+        f"{_CALL_EN} A payment of Rs {{AMOUNT}} for your subscription did not go through. "
+        f"You can complete it here: {_LINK}",
+    ("unknown", "hi"):
+        f"{_CALL_HI} आपके सब्सक्रिप्शन का Rs {{AMOUNT}} का भुगतान पूरा नहीं हुआ। आप इसे यहाँ "
+        f"पूरा कर सकते हैं: {_LINK}",
+    ("unknown", "hi_en"):
+        f"{_CALL_HE} Aapke subscription ka Rs {{AMOUNT}} ka payment complete nahi hua. Aap "
+        f"ise yahan complete kar sakte hain: {_LINK}",
+}
+
+# The English variant doubles as the (category, VOICE_CALL) entry, so voice needs no
+# special case anywhere in executor.static_template() and inherits the exhaustiveness
+# test that covers every other contact action.
+STATIC_TEMPLATES.update({
+    (category, "VOICE_CALL"): text
+    for (category, lang), text in VOICE_TEMPLATES.items() if lang == "en"
+})
+
 # Placeholder link used when an execution is simulated rather than a real test-mode
 # Payment Link. `.invalid` is reserved by RFC 2606 and can never resolve.
 SIMULATED_LINK_BASE = "https://example.invalid/pay/"
@@ -309,10 +447,16 @@ SIMULATED_LINK_BASE = "https://example.invalid/pay/"
 #  * STOP_HANDOFF moves no money and sends nothing, but it is not free — it puts a
 #    case in a human queue. Counting it is what stops "hand it off" from looking
 #    like a costless way to make a hard case disappear.
+#  * VOICE_CALL is priced between the two, at Rs 25: more than a link because a call
+#    costs real telephony minutes and carries a higher chance of an inbound follow-up,
+#    less than a handoff because it does not occupy a person for the length of a case.
+#    Rs 25 against Rs 40 is the whole economic argument for the rung — and because the
+#    EV gate reads this table, a voice call that is not worth Rs 25 is simply not made.
 ACTION_COST_PAISE: dict[str, int] = {
     "RETRY_LATER": 0,
     "SEND_UPDATE_LINK": 1200,
     "PROMISE_TO_PAY": 1200,
+    "VOICE_CALL": 2500,
     "STOP_HANDOFF": 4000,
 }
 
@@ -321,6 +465,11 @@ ACTION_COST_PAISE: dict[str, int] = {
 # Indexed by attempt number, escalating — the third message is more irritating than
 # the first, not equally so.
 CONTACT_CHURN_HAZARD: tuple[float, ...] = (0.004, 0.010, 0.020)
+# One hazard curve for every channel, deliberately. A per-channel multiplier for voice
+# was drafted and removed: a call is more intrusive to receive, and it is also the only
+# contact where the customer can object and be answered, so the sign of the difference
+# is genuinely unclear. An assumption with no basis and a direct effect on which
+# interventions fire is worse than no assumption.
 
 # What a cancellation costs, expressed as months of the failed charge. One charge
 # cycle is what the case is worth today; the subscription behind it is worth more.
@@ -351,6 +500,27 @@ P_RECOVER_PRIOR: dict[tuple[str, str], tuple[float, float, float]] = {
     ("issuer_declined", "SEND_UPDATE_LINK"): (0.30, 0.22, 0.14),
     ("authentication_failed", "SEND_UPDATE_LINK"): (0.42, 0.24, 0.16),
     ("invalid_payment_method", "SEND_UPDATE_LINK"): (0.26, 0.16, 0.10),
+
+    # Voice, at the third rung. Higher than a third silent message for the reason a
+    # call is worth more than a text — it is answered or it is not, and an answered one
+    # can hear an objection and take a dated promise, which no SMS can do. Not higher
+    # than a FIRST link, because by attempt 3 the easy cases are already gone; a prior
+    # that ignored that would let the EV gate wave through calls it should refuse.
+    # Voice holds its rate across attempts, like PROMISE_TO_PAY and unlike every push
+    # channel, and for the same reason: its OUTPUT IS AN AGREEMENT. A third SMS is a
+    # third time we said something; an answered call ends with the customer naming a
+    # day, and a date somebody chose converts differently from a deadline we imposed.
+    # That is the defensible claim here — the shape, not the third decimal.
+    #
+    # It matters more than it looks. The annoyance term at attempt 3 is
+    # 0.020 x 12 = 0.24 of the amount, so ANY third contact whose prior sits below 0.24
+    # is uneconomic at every ticket size, because the amount cancels out of both sides.
+    # A decaying voice prior would mean the rung could never fire and the whole rung
+    # would be decorative.
+    ("card_expired", "VOICE_CALL"): (0.38, 0.36, 0.34),
+    ("issuer_declined", "VOICE_CALL"): (0.34, 0.32, 0.30),
+    ("authentication_failed", "VOICE_CALL"): (0.40, 0.38, 0.36),
+    ("insufficient_funds", "VOICE_CALL"): (0.42, 0.40, 0.38),
 }
 # Anything the table does not name is assumed to work poorly rather than averagely.
 # An unlisted pair is a pair nobody reasoned about, and the safe reading of a cell

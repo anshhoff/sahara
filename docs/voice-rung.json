@@ -1,0 +1,61 @@
+{
+  "delta": {
+    "cost_paise": 806800,
+    "incremental_paise": 5758715,
+    "incremental_paise_ci95": [
+      -5872205,
+      17666448
+    ],
+    "lift_pp": 7.36,
+    "lift_pp_ci95": [
+      2.17,
+      12.5
+    ],
+    "lift_significant": true,
+    "net_incremental_paise": 4951915,
+    "net_incremental_paise_ci95": [
+      -6679005,
+      16859648
+    ],
+    "net_significant": false
+  },
+  "method": {
+    "caveat": "the two runs diverge in the seeded RNG stream the moment their policies differ, so they are two draws from one world under two policies rather than one world observed twice. That is what a policy comparison is; it is also why there is no paired test here, because there are no matched pairs to pair.",
+    "interval": "percentile bootstrap over cases, 10000 resamples, seed 42",
+    "statistic": "difference in lifts \u2014 each batch carries its own control arm, so this is a difference-in-differences and the organic recovery common to both worlds cancels out twice"
+  },
+  "with_voice": {
+    "by_action": {
+      "PROMISE_TO_PAY": 157,
+      "RETRY_LATER": 880,
+      "SEND_UPDATE_LINK": 1005,
+      "VOICE_CALL": 328
+    },
+    "control": "89/701",
+    "cost_paise": 2214400,
+    "db": "/private/tmp/claude-501/-Users-anshhardaha-Resources-com-razorpay-proj/ca1a217e-3533-40c7-97d1-21dc2518b341/scratchpad/voice_on.db",
+    "incremental_paise": 58349622,
+    "lift": 0.5143,
+    "n_handoff": 526,
+    "promises": {
+      "broken": 65,
+      "kept": 30
+    },
+    "treated": "840/1310"
+  },
+  "without_voice": {
+    "by_action": {
+      "PROMISE_TO_PAY": 169,
+      "RETRY_LATER": 880,
+      "SEND_UPDATE_LINK": 1004
+    },
+    "control": "89/701",
+    "cost_paise": 1407600,
+    "db": "/private/tmp/claude-501/-Users-anshhardaha-Resources-com-razorpay-proj/ca1a217e-3533-40c7-97d1-21dc2518b341/scratchpad/voice_off.db",
+    "incremental_paise": 52590907,
+    "lift": 0.4406,
+    "n_handoff": 622,
+    "promises": {},
+    "treated": "743/1309"
+  }
+}

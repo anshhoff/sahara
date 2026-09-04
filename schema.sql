@@ -88,7 +88,7 @@ CREATE TABLE IF NOT EXISTS intervention_decision (
   category TEXT NOT NULL CHECK (category IN ('card_expired','insufficient_funds',
     'issuer_declined','authentication_failed','invalid_payment_method','unknown')),
   action TEXT NOT NULL CHECK (action IN ('RETRY_LATER','SEND_UPDATE_LINK',
-    'PROMISE_TO_PAY','STOP_HANDOFF')),
+    'PROMISE_TO_PAY','VOICE_CALL','STOP_HANDOFF')),
   policy_row_ref TEXT NOT NULL,
   invariant_check TEXT NOT NULL,
   decided_at TEXT NOT NULL,
@@ -113,10 +113,14 @@ CREATE TABLE IF NOT EXISTS execution_record (
   decision_id TEXT NOT NULL UNIQUE REFERENCES intervention_decision(id),
   case_id TEXT NOT NULL REFERENCES recovery_case(id),
   action TEXT NOT NULL CHECK (action IN ('RETRY_LATER','SEND_UPDATE_LINK',
-    'PROMISE_TO_PAY','STOP_HANDOFF')),
-  mode TEXT NOT NULL CHECK (mode IN ('razorpay_test','simulated')),
+    'PROMISE_TO_PAY','VOICE_CALL','STOP_HANDOFF')),
+  -- `plivo_trial_verified` is reserved for a REAL voice transmission to a number on
+  -- the I8 allowlist. It is a mode of its own so that metrics can never fold a demo
+  -- call into ordinary outreach counts, and so a query for "did this system ever
+  -- actually dial anyone" has a single, honest answer.
+  mode TEXT NOT NULL CHECK (mode IN ('razorpay_test','simulated','plivo_trial_verified')),
   razorpay_ref TEXT,
-  simulated_channel TEXT CHECK (simulated_channel IN ('sms','email') OR simulated_channel IS NULL),
+  simulated_channel TEXT CHECK (simulated_channel IN ('sms','email','voice') OR simulated_channel IS NULL),
   message_copy TEXT,
   copy_source TEXT CHECK (copy_source IN ('llm_draft','static_template') OR copy_source IS NULL),
   copy_validation TEXT,
@@ -170,6 +174,38 @@ CREATE TABLE IF NOT EXISTS suppression (
   created_at TEXT NOT NULL
 );
 
+-- --------------------------------------------------------------------- Promise
+-- A date the customer ACTUALLY NAMED, not a window we imposed.
+--
+-- `send_promise_offer` sets a 72-hour deadline and calls it a promise. It is not one:
+-- nothing the customer said is recorded anywhere, so there is no promise to keep or
+-- break. This table holds the other thing — an inbound reading extracted from what
+-- they said on a call, scheduled to the date they gave, swept on lapse, and resolved
+-- as kept or broken.
+--
+-- There is deliberately NO AMOUNT COLUMN. The whole point of the closed inbound schema
+-- (app/inbound.py) is that a compromised model, or a caller who talks their way into
+-- one, cannot make the system state a wrong rupee figure — because there is nowhere
+-- for the figure to travel. A column here would reopen exactly that path.
+CREATE TABLE IF NOT EXISTS promise (
+  id TEXT PRIMARY KEY,
+  case_id TEXT NOT NULL REFERENCES recovery_case(id),
+  execution_id TEXT REFERENCES execution_record(id),
+  -- The closed intent enum, mirrored from app/inbound.py. Duplicated here on purpose:
+  -- the schema is the backstop of the LLM boundary, exactly as it is for `category`.
+  intent TEXT NOT NULL CHECK (intent IN ('will_pay_on_date','will_pay_now','cannot_pay',
+    'disputes_charge','wrong_number','opt_out','no_answer','unclear')),
+  promised_date TEXT,
+  source TEXT NOT NULL CHECK (source IN ('llm','rule','human')),
+  reading_confidence REAL,
+  reading_raw TEXT,
+  status TEXT NOT NULL CHECK (status IN ('open','kept','broken')),
+  created_at TEXT NOT NULL,
+  due_at TEXT NOT NULL,
+  resolved_at TEXT,
+  synthetic INTEGER NOT NULL DEFAULT 0 CHECK (synthetic IN (0,1))
+);
+
 -- ---------------------------------------------------------------- DispatchFence
 -- One row per fence evaluation, INCLUDING the ones that cleared. The clear rows are
 -- the denominator: "outreach to already-settled customers: 0 of N dispatches fenced"
@@ -215,4 +251,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_case_seq ON audit_log(case_id, seq);
 CREATE INDEX IF NOT EXISTS idx_execution_executed_at ON execution_record(executed_at);
 CREATE INDEX IF NOT EXISTS idx_case_customer ON recovery_case(customer_id);
 CREATE INDEX IF NOT EXISTS idx_fence_case ON dispatch_fence(case_id, phase);
+CREATE INDEX IF NOT EXISTS idx_promise_case ON promise(case_id);
+CREATE INDEX IF NOT EXISTS idx_promise_due ON promise(status, due_at);
 CREATE INDEX IF NOT EXISTS idx_event_settlement ON failure_event(subscription_id, event_type, received_at);
