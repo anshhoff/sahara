@@ -317,6 +317,17 @@ def promise_stats() -> dict[str, Any]:
     return metrics.promises()
 
 
+@router.get("/voice-calls")
+def voice_calls() -> dict[str, Any]:
+    """Every voice call placed, the transcript, and the reading taken from it.
+
+    Deliberately NOT folded into /summary. The transcripts are the one payload here
+    that grows with the batch rather than with the number of metrics, and a summary
+    endpoint that carries ninety utterances is a summary endpoint nobody can read.
+    """
+    return metrics.voice_calls()
+
+
 @router.get("/fencing")
 def fencing_stats() -> dict[str, Any]:
     """The dispatch-fencing claim, with its denominator attached.

@@ -223,6 +223,66 @@ def promises() -> dict[str, Any]:
     }
 
 
+# ----------------------------------------------------------------- voice calls
+def voice_calls() -> dict[str, Any]:
+    """Every voice call placed, with what was said and what was read out of it.
+
+    The promise table holds only the readings that produced a trackable date. That is
+    the right shape for `promises()` and the wrong shape for a reader asking whether the
+    reading works: the seven intents that make no promise are not gaps, they are the
+    enum doing its job, and a table that hides them makes the reader look better than it
+    is by only ever showing its successes.
+
+    Joined on `promise.execution_id`, not on the case id: a case can carry more than one
+    call over an episode, and matching by case would attach a later call's promise to an
+    earlier call's transcript.
+    """
+    rows = db.rows_to_dicts(db.query(
+        "SELECT e.id, e.case_id, e.executed_at, e.mode, e.result_payload,"
+        "       p.status AS promise_status, p.due_at"
+        "  FROM execution_record e"
+        "  LEFT JOIN promise p ON p.execution_id = e.id"
+        " WHERE e.action = 'VOICE_CALL'"
+        " ORDER BY e.executed_at DESC, e.rowid DESC"))
+    calls: list[dict[str, Any]] = []
+    for r in rows:
+        try:
+            payload = json.loads(r["result_payload"]) or {}
+        except (TypeError, ValueError):
+            payload = {}
+        reading = payload.get("inbound_reading") or {}
+        calls.append({
+            "execution_id": r["id"],
+            "case_id": r["case_id"],
+            "executed_at": r["executed_at"],
+            "transmission": payload.get("transmission"),
+            "transcript": payload.get("inbound_transcript"),
+            "language": payload.get("language"),
+            "intent": reading.get("intent"),
+            "promised_date": reading.get("promised_date"),
+            "source": reading.get("source"),
+            "confidence": reading.get("confidence"),
+            "promise_status": r["promise_status"],
+            "due_at": r["due_at"],
+            "mode": r["mode"],
+        })
+    by_intent: dict[str, int] = {}
+    for c in calls:
+        key = c["intent"] or "unread"
+        by_intent[key] = by_intent.get(key, 0) + 1
+    n_promised = sum(1 for c in calls if c["promise_status"] is not None)
+    return {
+        "n_calls": len(calls),
+        "n_answered": sum(1 for c in calls if c["intent"] not in (None, "no_answer")),
+        "n_promised": n_promised,
+        "by_intent": by_intent,
+        "calls": calls,
+        "note": ("a call produces a promise only when the intent is will_pay_on_date AND the "
+                 "date resolves inside the episode window. The other intents are the enum "
+                 "working, not readings that were lost."),
+    }
+
+
 # ------------------------------------------------------------------ provenance
 def synthetic_split() -> dict[str, Any]:
     n_total = int(db.scalar("SELECT COUNT(*) FROM recovery_case", (), 0))
