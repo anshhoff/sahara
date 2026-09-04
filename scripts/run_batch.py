@@ -26,7 +26,7 @@ from typing import Any, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import cases as case_store  # noqa: E402
-from app import audit, clock, config, db, executor, llm, metrics, webhooks  # noqa: E402
+from app import audit, clock, config, db, executor, fencing, llm, metrics, webhooks  # noqa: E402
 
 # --------------------------------------------------------------- outcome model
 # (category, action) -> probability of the money actually arriving, by attempt.
@@ -515,6 +515,18 @@ def acceptance_checks(runner: Optional["Runner"] = None) -> list[tuple[str, bool
         "SELECT id FROM recovery_case WHERE is_holdout = 1 AND attempt_count > 0")
     check("control arm consumed zero attempts", not bad, ", ".join(r["id"] for r in bad))
 
+    # Dispatch fencing. The claim is worth nothing without its denominator, so the
+    # detail carries both — a zero over zero would mean the fences never ran.
+    fences = fencing.fence_stats()
+    check("fencing: zero outreach to already-settled customers",
+          fences["outreach_to_settled"] == 0,
+          ", ".join(fences["outreach_to_settled_case_ids"]))
+    check("fencing: every contact dispatch passed a pre-dispatch fence",
+          fences["n_dispatches_fenced"] >= int(db.scalar(
+              "SELECT COUNT(*) FROM execution_record WHERE action IN"
+              " ('SEND_UPDATE_LINK','PROMISE_TO_PAY','VOICE_CALL')", (), 0)),
+          f"{fences['n_dispatches_fenced']} pre-dispatch fences recorded")
+
     rec = metrics.reconciliation()
     check("reconciliation: recovered + stopped + open == cases", rec["counts_balance"], json.dumps(rec))
     check("reconciliation: recovered <= at risk", rec["amounts_balance"], "")
@@ -586,6 +598,16 @@ def print_summary(runner: Runner, accuracy: dict[str, Any]) -> None:
         lo, hi = net["net_incremental_paise_ci95"]
         print(f"    {'NET INCREMENTAL':28s} Rs {net['net_incremental_paise'] / 100:,.2f}"
               f"   95% CI [Rs {lo / 100:,.0f}, Rs {hi / 100:,.0f}]")
+    fences = s.get("fencing") or {}
+    if fences:
+        pre = fences.get("by_phase", {}).get("pre_dispatch", {})
+        print("  fencing:")
+        print(f"    {fences['claim']}")
+        print(f"    {'pre-dispatch verdicts':28s} "
+              f"{pre.get('clear', 0)} clear, {pre.get('settled', 0)} settled, "
+              f"{pre.get('unverified', 0)} unverified")
+        print(f"    {'cases stopped as settled':28s} {fences.get('stopped_already_settled', 0)}"
+              f"   compensation entries {fences.get('n_compensations', 0)}")
     print(f"  audit chain: {s['audit_chain']['status']}, "
           f"{s['audit_chain']['n_checked']} entries, head {s['audit_chain']['head'][:16]}...")
     llm = s["llm"]

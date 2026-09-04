@@ -14,7 +14,7 @@ import json
 import random
 from typing import Any, Optional
 
-from app import audit, clock, config, db
+from app import audit, clock, config, db, fencing
 
 Traced = tuple[Any, list[str]]
 
@@ -484,6 +484,7 @@ def summary() -> dict[str, Any]:
         "execution_modes": execution_modes(),
         "reconciliation": reconciliation(),
         "incremental": incremental_recovery(),
+        "fencing": fencing.fence_stats(),
         "costs": costs(),
         "net": net_recovery(),
         "audit_chain": audit.verify(),

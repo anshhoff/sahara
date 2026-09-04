@@ -242,6 +242,22 @@
             decision <em>and</em> again before execution. The counts are live.
           </p>
           <div class="guards" id="guards"></div>
+
+          <div class="panel" style="margin-top:18px">
+            <div class="panel-head"><h2>Dispatch fencing</h2><span class="spacer"></span>
+              <span class="muted" id="fence-claim"></span></div>
+            <div class="panel-body">
+              <p class="lede" style="margin-top:0">
+                Every invariant above re-reads the <em>case</em> — our record of the world, exactly as stale as the
+                last webhook that happened to arrive. These three fences re-read the world itself, because between
+                deciding and acting the customer may already have paid. A fence <strong>degrades, it never
+                raises</strong>: when it cannot reach the truth it records <code>unverified</code> and lets the
+                dispatch through, so &ldquo;we did not check&rdquo; is never mistaken for &ldquo;we checked and it
+                was fine.&rdquo;
+              </p>
+              <div id="fences"></div>
+            </div>
+          </div>
         </div>
 
         <!-- ......................................................... policy -->

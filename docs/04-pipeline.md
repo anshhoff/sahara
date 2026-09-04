@@ -317,6 +317,92 @@ an `AssertionError` — that is a build error, not a runtime condition.
 > sentence mentioning any other number ("within 24 hours", "attempt 2 of 3"). Slots are
 > strictly safer *and* let copy cite the bounds the system actually enforces.
 
+### 5.4 Dispatch fencing — `fencing.py`
+
+Every invariant in §5 answers **"are we allowed to do this?"**. The fences answer a
+different question, and it is equally load-bearing: **"is this still true?"**
+
+Between the moment a decision is made and the moment it acts, the world moves. The
+customer pays. The issuer stops declining. Razorpay's own retry succeeds. None of the
+invariants notice, because none of them re-reads the *world* — they re-read the **case**,
+which is our record of the world and is exactly as stale as the last webhook we happened
+to receive. Without a fence this system can dun someone who settled an hour ago **and
+produce a perfect audit trail proving it did so correctly.**
+
+```mermaid
+flowchart LR
+    D["decision due"] --> I["invariants<br/><small>are we allowed?</small>"]
+    I -->|pass| F1{{"guard_dispatch<br/><small>is it still true?</small>"}}
+    F1 -->|settled| S["stopped_already_settled<br/><small>no attempt spent</small>"]
+    F1 -->|clear / unverified| C["claim + reserve_attempt"] --> H["handler → payment link"]
+    H --> F2{{"verify_after_write"}}
+    F2 -->|settled| K["cancel link (best effort)<br/>**compensate** audit entry<br/><small>appended either way</small>"] --> S
+    F2 -->|clear| OK["done"]
+
+    classDef fence fill:#fff6e5,stroke:#c98a12,color:#3a2a05
+    class F1,F2,K fence
+```
+
+| # | Fence | When | On a blocking verdict |
+|---|---|---|---|
+| 1 | `guard_dispatch()` | immediately before any **contact** action | case → `stopped_already_settled`; decision → `blocked_by_fence`. **Neither the claim nor an attempt is consumed** — nothing forbade the message, there was simply nothing left to collect |
+| 2 | `verify_after_write()` | once a payment link exists | best-effort `payment_link.cancel`, then a **`compensate`** audit entry **whether or not the cancellation succeeded** |
+| 3 | `inference_unchanged()` | around the model call in `diagnosis.py` | the model's answer is *recorded* and *not acted on*; the case falls to `unknown`, which always stops (I4) |
+
+**`RETRY_LATER` is deliberately not fenced.** A silent re-charge of an already-settled
+mandate is a no-op at the gateway, not a message to somebody who owes nothing. The fence
+exists to stop unwanted *contact*.
+
+#### The design rule: a fence degrades, it never raises
+
+A transport fault inside a fence is caught, logged, and reported as data. **A fence that
+can crash the pipeline is strictly worse than no fence at all**, and Razorpay's test-mode
+rate limits make that a real path rather than a theoretical one.
+
+When a fence cannot reach the truth it returns `unverified`, which does **not** block —
+and it is written to `dispatch_fence` as a row of its own, so *"we did not check"* is
+never silently indistinguishable from *"we checked and it was fine"*.
+
+#### Where the truth comes from
+
+| Source | Used when | What it reads |
+|---|---|---|
+| `razorpay_fetch` | Razorpay is configured **and** the case is not synthetic | `subscription.fetch()`. A status in `active / completed / cancelled / expired` means there is nothing left to collect |
+| `local_ledger` | otherwise, and always for synthetic cases | a settlement event for this subscription in `failure_event`, received since the case opened |
+| `degraded` | the above raised | `unverified` |
+
+A synthetic subscription id does not exist at Razorpay, and asking about it would return
+a 404 that a naive fence would misread as *"not settled"*. Hence the split.
+
+The local arm is a **cross-check between two independent representations** — the case row
+and the immutable event ledger — rather than a second read of the same one. It fires when
+they disagree, which is exactly what a crash inside `intake()` produces: look at the
+ordering in §2.3, where the event row is written *first* as the claim token and the case
+transition happens *second*. Anything that stops the process between those two lines
+leaves the money recorded as arrived and the case still open, waiting to be dunned.
+
+#### The stale-inference fingerprint
+
+SHA-256 over **decision-relevant fields only** — status, attempt count, category, opt-out,
+arm, amount, currency, and whether a payment link exists — plus nothing else.
+
+`updated_at` moves on every touch. `last_contact_at` is re-read by I2 at execution anyway.
+Customer metadata has never entered a decision at all. A fingerprint covering those would
+trip constantly, be switched off within a week, and protect nothing. **The value of this
+guard is precisely that it is quiet**, and `tests/test_fencing.py` asserts that notes,
+timestamps and metadata leave the hash stable while every decision-relevant field moves it.
+
+#### The metric, with its denominator
+
+> **outreach to already-settled customers: 0 of N dispatches fenced**
+
+A zero with no denominator attests to nothing. `dispatch_fence` records **every**
+evaluation including the clear ones, precisely so there is a denominator; `GET /api/fencing`
+serves the numerator, the denominator, the per-phase verdict counts and every compensation
+entry. The numerator is *computed* — executions that went out on a case a fence had already
+called settled — rather than asserted to be zero, and a test drives it non-zero on purpose
+so the metric cannot be decoration.
+
 ## 6. Outcome
 
 A case counts as **recovered only on a real recovery signal** — `subscription.charged`

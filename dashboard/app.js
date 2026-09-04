@@ -455,6 +455,52 @@ function renderGuards() {
       '<p class="guard-plain">' + esc(i.plain) + "</p>" +
       '<div class="guard-rule">' + esc(i.rule) + "</div>" +
     "</div>").join("");
+  renderFences();
+}
+
+/* ---------------------------------------------------------------- fences */
+const FENCE_PHASES = [
+  ["pre_dispatch", "Before dispatch",
+   "Re-fetch the subscription immediately before any contact leaves. Blocking stops the cycle; no attempt is spent."],
+  ["post_dispatch", "After the write",
+   "Re-fetch once a payment link exists. Too late not to create it; not too late to cancel it and say so."],
+  ["inference", "Around the model call",
+   "A SHA-256 over decision-relevant fields only, taken before the call and rechecked after. Notes, timestamps and customer metadata never move it."],
+];
+
+function renderFences() {
+  const f = (state.summary || {}).fencing;
+  const host = $("#fences");
+  if (!host) return;
+  if (!f) { host.innerHTML = '<p class="dim">No fencing data in this batch.</p>'; return; }
+
+  $("#fence-claim").textContent = f.claim || "";
+  host.innerHTML =
+    '<table class="grid"><thead><tr>' +
+      "<th>Fence</th><th class='num'>clear</th><th class='num'>settled</th>" +
+      "<th class='num'>changed</th><th class='num'>unverified</th></tr></thead><tbody>" +
+    FENCE_PHASES.map(function (row) {
+      const v = (f.by_phase || {})[row[0]] || {};
+      return "<tr><th><div>" + esc(row[1]) + "</div>" +
+        '<div class="dim" style="font-weight:400">' + esc(row[2]) + "</div></th>" +
+        '<td class="num">' + (v.clear || 0) + "</td>" +
+        '<td class="num">' + (v.settled || 0) + "</td>" +
+        '<td class="num">' + (v.changed || 0) + "</td>" +
+        '<td class="num">' + (v.unverified || 0) + "</td></tr>";
+    }).join("") + "</tbody></table>" +
+    '<div class="legend" style="margin-top:12px">' +
+      '<span class="key"><span class="badge ' + (f.outreach_to_settled ? "danger" : "ok") + '">' +
+        f.outreach_to_settled + "</span>&nbsp;outreach to already-settled customers, of " +
+        f.n_dispatches_fenced + " dispatches fenced</span>" +
+      '<span class="key"><span class="badge">' + (f.stopped_already_settled || 0) +
+        "</span>&nbsp;cases stopped as already settled</span>" +
+      '<span class="key"><span class="badge">' + (f.n_compensations || 0) +
+        "</span>&nbsp;compensation entries in the audit trail</span>" +
+    "</div>" +
+    ((f.outreach_to_settled_case_ids || []).length
+      ? '<p class="dim mono" style="margin-top:8px">' +
+          esc(f.outreach_to_settled_case_ids.join(" · ")) + "</p>"
+      : "");
 }
 
 /* ---------------------------------------------------------------- policy */

@@ -12,7 +12,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
-from app import audit, cases, config, db, invariants, metrics
+from app import audit, cases, config, db, fencing, invariants, metrics
 
 router = APIRouter(prefix="/api", tags=["dashboard"])
 
@@ -270,6 +270,18 @@ def get_case(case_id: str) -> dict[str, Any]:
             "episode_window_days": config.EPISODE_WINDOW_DAYS,
         },
     }
+
+
+@router.get("/fencing")
+def fencing_stats() -> dict[str, Any]:
+    """The dispatch-fencing claim, with its denominator attached.
+
+    "Outreach to already-settled customers: 0" is not a claim on its own — 0 of what?
+    This returns the numerator, the denominator, the per-phase verdict counts including
+    `unverified`, and every compensation entry, so the zero is checkable rather than
+    asserted.
+    """
+    return fencing.fence_stats()
 
 
 @router.get("/metrics/trace/{metric}")

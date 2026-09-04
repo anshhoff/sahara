@@ -15,7 +15,7 @@ import logging
 import re
 from typing import Any, Optional
 
-from app import audit, cases, clock, config, db, economics, invariants, llm
+from app import audit, cases, clock, config, db, economics, fencing, invariants, llm
 
 log = logging.getLogger(__name__)
 
@@ -340,6 +340,38 @@ def execute_decision(decision: dict[str, Any]) -> Optional[dict[str, Any]]:
         )
         return None
 
+    # ------------------------------------------------------------- fence 1 of 2
+    # Look before you leap. Every invariant above re-read the CASE — our record of the
+    # world, exactly as stale as the last webhook that happened to arrive. This re-reads
+    # the world itself, immediately before a message goes out, because between deciding
+    # and acting the customer may already have paid. Contact actions only: a silent
+    # mandate re-charge of an already-settled subscription is a no-op at the gateway,
+    # not a message to somebody who owes nothing.
+    #
+    # Placed BEFORE the claim and before reserve_attempt, so a fenced dispatch consumes
+    # neither. Nothing forbade this message; there was simply nothing left to collect.
+    if decision["action"] in config.CONTACT_ACTIONS:
+        fence = fencing.guard_dispatch(case, decision["action"], decision_id=decision["id"])
+        if fence.blocks:
+            db.update("intervention_decision", decision["id"], {"status": "blocked_by_fence"})
+            cases.transition(
+                case["id"], "stopped_already_settled",
+                summary=(f"Attempt {decision['attempt_number']} fenced before dispatch: "
+                         f"{fence.reason}. No contact was sent."),
+                detail={
+                    "fence": fencing.PRE_DISPATCH,
+                    "verdict": fence.verdict,
+                    "source": fence.source,
+                    "reason": fence.reason,
+                    "evidence": fence.detail,
+                    "decision_id": decision["id"],
+                    "blocked_action": decision["action"],
+                    "note": ("a correctness stop, not a safety one: no rule forbade this "
+                             "message, the money had already arrived"),
+                },
+            )
+            return None
+
     handler = _HANDLERS.get(decision["action"])
     if handler is None:  # STOP_HANDOFF never reaches the executor; policy closes the case
         raise ValueError(f"action {decision['action']} is not executable")
@@ -433,6 +465,31 @@ def execute_decision(decision: dict[str, Any]) -> Optional[dict[str, Any]]:
             "result_payload": result.get("result_payload"),
         },
     )
+    # ------------------------------------------------------------- fence 2 of 2
+    # Verify after write. The link exists and cannot be un-created; what can still be
+    # done is cancel it and say so. The compensation entry is appended whether or not
+    # the cancellation succeeds — the attempt is the evidence, and the failed one is
+    # the entry a reader most needs to see.
+    if decision["action"] in config.CONTACT_ACTIONS:
+        after = fencing.verify_after_write(
+            cases.get(case["id"]), decision["action"], result.get("razorpay_ref"),
+            decision_id=decision["id"], execution_id=execution_id)
+        if after.blocks:
+            cases.transition(
+                case["id"], "stopped_already_settled",
+                summary=(f"Attempt {decision['attempt_number']} was dispatched, then the world "
+                         f"moved: {after.reason}. Compensation recorded."),
+                detail={
+                    "fence": fencing.POST_DISPATCH,
+                    "verdict": after.verdict,
+                    "source": after.source,
+                    "reason": after.reason,
+                    "evidence": after.detail,
+                    "decision_id": decision["id"],
+                    "execution_id": execution_id,
+                },
+            )
+
     return db.row_to_dict(db.query_one("SELECT * FROM execution_record WHERE id = ?", (execution_id,)))
 
 

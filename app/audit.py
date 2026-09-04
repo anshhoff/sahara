@@ -22,7 +22,7 @@ from typing import Any, Optional
 
 from app import clock, db
 
-STAGES = ("detect", "diagnose", "decide", "execute", "stop", "outcome")
+STAGES = ("detect", "diagnose", "decide", "execute", "stop", "outcome", "compensate")
 ACTORS = ("system", "llm", "razorpay", "human")
 
 # The chain's anchor. Nothing precedes the first entry, so it hashes against a

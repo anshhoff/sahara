@@ -94,6 +94,13 @@ CASE_STATUSES = (
     # A control-arm case: deliberately never intervened on, so the treated arm has
     # something to be measured against. Not a failure and not a safety stop.
     "stopped_holdout",
+    # A dispatch fence found the money had already arrived between deciding and
+    # acting (app/fencing.py). This is a CORRECTNESS stop rather than a safety one:
+    # nothing forbade the message, there was simply nothing left to collect.
+    "stopped_already_settled",
+    # I8 failing closed: a real transmission was proposed to a destination that is not
+    # on the verified-recipient allowlist, so it refused rather than dialled.
+    "stopped_unverified_recipient",
 )
 TERMINAL_STATUSES = tuple(s for s in CASE_STATUSES if s != "open")
 STOPPED_STATUSES = tuple(s for s in CASE_STATUSES if s.startswith("stopped_"))

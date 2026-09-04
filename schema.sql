@@ -17,7 +17,12 @@ CREATE TABLE IF NOT EXISTS recovery_case (
   currency TEXT NOT NULL DEFAULT 'INR',
   status TEXT NOT NULL CHECK (status IN ('open','recovered','stopped_max_attempts',
     'stopped_cooldown_expired','stopped_opt_out','stopped_unknown','stopped_handoff',
-    'stopped_uneconomic','stopped_suppressed','stopped_holdout')),
+    'stopped_uneconomic','stopped_suppressed','stopped_holdout',
+    -- The dispatch fences (app/fencing.py). `already_settled` is a CORRECTNESS stop,
+    -- not a safety one: the money arrived between deciding and acting, so there was
+    -- nothing left to dun. `unverified_recipient` is I8 failing closed on a real
+    -- transmission whose destination is not on the allowlist.
+    'stopped_already_settled','stopped_unverified_recipient')),
   attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count BETWEEN 0 AND 3),
   last_contact_at TEXT,
   current_category TEXT CHECK (current_category IN ('card_expired','insufficient_funds',
@@ -88,7 +93,12 @@ CREATE TABLE IF NOT EXISTS intervention_decision (
   invariant_check TEXT NOT NULL,
   decided_at TEXT NOT NULL,
   scheduled_for TEXT NOT NULL,
-  status TEXT NOT NULL CHECK (status IN ('scheduled','executed','blocked_by_invariant','superseded')),
+  -- `blocked_by_fence` is distinct from `blocked_by_invariant` on purpose: an
+  -- invariant refused permission, a fence found the premise had expired. Collapsing
+  -- them would make "we were not allowed to" and "there was nothing left to do"
+  -- read as the same event in the ledger, and they are not.
+  status TEXT NOT NULL CHECK (status IN ('scheduled','executed','blocked_by_invariant',
+    'blocked_by_fence','superseded')),
   -- The economics of this decision, computed BEFORE it was taken (app/economics.py).
   -- Written on every decision, not only the ones the gate stopped, so that a reader
   -- can see what the agent expected to gain from an action it went ahead with.
@@ -126,7 +136,12 @@ CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   case_id TEXT NOT NULL REFERENCES recovery_case(id),
   seq INTEGER NOT NULL,
-  stage TEXT NOT NULL CHECK (stage IN ('detect','diagnose','decide','execute','stop','outcome')),
+  -- `compensate` records an action taken to undo or offset a dispatch that turned out
+  -- to be wrong — a cancelled payment link after a mid-flight settlement. It is a
+  -- stage of its own because it is neither a decision nor an execution nor a stop: it
+  -- is what happened AFTER the system found out it had acted on a stale world.
+  stage TEXT NOT NULL CHECK (stage IN ('detect','diagnose','decide','execute','stop',
+    'outcome','compensate')),
   actor TEXT NOT NULL CHECK (actor IN ('system','llm','razorpay','human')),
   summary TEXT NOT NULL,
   detail TEXT NOT NULL,
@@ -155,6 +170,29 @@ CREATE TABLE IF NOT EXISTS suppression (
   created_at TEXT NOT NULL
 );
 
+-- ---------------------------------------------------------------- DispatchFence
+-- One row per fence evaluation, INCLUDING the ones that cleared. The clear rows are
+-- the denominator: "outreach to already-settled customers: 0 of N dispatches fenced"
+-- is a claim; a bare zero is not.
+--
+-- `unverified` is a first-class verdict rather than an absent row, because a fence
+-- that could not reach the truth must never be indistinguishable from one that
+-- checked and was satisfied.
+CREATE TABLE IF NOT EXISTS dispatch_fence (
+  id TEXT PRIMARY KEY,
+  case_id TEXT NOT NULL REFERENCES recovery_case(id),
+  decision_id TEXT,
+  execution_id TEXT,
+  phase TEXT NOT NULL CHECK (phase IN ('pre_dispatch','post_dispatch','inference')),
+  action TEXT NOT NULL,
+  verdict TEXT NOT NULL CHECK (verdict IN ('clear','settled','changed','unverified')),
+  source TEXT NOT NULL,
+  reason TEXT,
+  detail TEXT,
+  checked_at TEXT NOT NULL,
+  synthetic INTEGER NOT NULL DEFAULT 0 CHECK (synthetic IN (0,1))
+);
+
 -- ------------------------------------------------------------------- run metadata
 -- One row per batch run, so the dashboard banner can state the seed honestly (docs/06 §1.2).
 CREATE TABLE IF NOT EXISTS batch_run (
@@ -176,3 +214,5 @@ CREATE INDEX IF NOT EXISTS idx_execution_case ON execution_record(case_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_case_seq ON audit_log(case_id, seq);
 CREATE INDEX IF NOT EXISTS idx_execution_executed_at ON execution_record(executed_at);
 CREATE INDEX IF NOT EXISTS idx_case_customer ON recovery_case(customer_id);
+CREATE INDEX IF NOT EXISTS idx_fence_case ON dispatch_fence(case_id, phase);
+CREATE INDEX IF NOT EXISTS idx_event_settlement ON failure_event(subscription_id, event_type, received_at);
