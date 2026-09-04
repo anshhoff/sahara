@@ -19,6 +19,7 @@ router off in one place (config.CONTROL_ENABLED).
 """
 from __future__ import annotations
 
+import io
 import os
 import re
 import subprocess
@@ -26,6 +27,7 @@ import sys
 import threading
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -86,6 +88,12 @@ class Job:
 
 _jobs: dict[str, Job] = {}
 _job_order: list[str] = []
+
+# Cases files a CSV upload has produced, keyed by the upload's own job id. `/batch`
+# accepts only an id from this registry — never a client-supplied path — so an
+# uploaded file can be replayed but nothing else on disk can be named into a batch run.
+UPLOADS_DIR = config.ROOT / "uploads"
+_uploaded_cases: dict[str, Path] = {}
 _active: Optional[str] = None
 _job_lock = threading.Lock()
 
@@ -224,32 +232,108 @@ def run_tests(req: TestsRequest) -> dict[str, Any]:
 
 # ------------------------------------------------------------------- batch
 class BatchRequest(BaseModel):
-    n: int = Field(default=80, ge=10, le=400)
-    seed: int = Field(default=42)
+    n: int = Field(default=80, ge=10, le=400,
+                   description="ignored when cases_upload_id is set — the CSV decides the count")
+    seed: int = Field(default=42,
+                      description="seeds case generation AND the outcome model's own random "
+                                  "rolls (self-cure, the 'roll' outcome script); an uploaded "
+                                  "CSV still uses this to fill in whatever it left blank")
     holdout: float = Field(default=0.35, ge=0.0, le=0.6,
                            description="fraction of cases assigned to the untouched control arm")
     live_links: int = Field(default=0, ge=0, le=5,
                             description="real test-mode Payment Links to spend; 0 keeps the run offline")
+    cases_upload_id: Optional[str] = Field(
+        default=None,
+        description="an id returned by POST /api/control/upload-cases. When set, the batch "
+                    "replays that CSV's cases instead of generating fresh synthetic ones; "
+                    "`n` is ignored and `seed` still governs the outcome model.")
 
 
 @router.post("/batch")
 def run_batch(req: BatchRequest) -> dict[str, Any]:
-    """Regenerate the synthetic cases and replay the whole batch, resetting the database.
+    """Replay a batch, resetting the database — either freshly generated synthetic cases,
+    or a previously uploaded CSV's.
 
-    This is the README's reproduce command, run verbatim — including the seed, so the
-    run is the same one a judge gets from their own terminal.
+    Generated is the README's reproduce command, run verbatim — including the seed, so
+    the run is the same one a judge gets from their own terminal. An uploaded CSV runs
+    through the identical second step (`run_batch.py --cases ...`); only where the cases
+    file comes from differs.
     """
     _guard()
     py = sys.executable
-    steps = [
-        [py, "scripts/generate_synthetic.py", "--n", str(req.n), "--seed", str(req.seed),
-         "--out", "synthetic_cases.json"],
-        [py, "scripts/run_batch.py", "--cases", "synthetic_cases.json",
-         "--db", config.DB_PATH, "--holdout", str(req.holdout),
-         "--live-links", str(req.live_links)],
-    ]
-    job = Job("batch", f"batch n={req.n} seed={req.seed} holdout={req.holdout}", steps)
+    steps: list[list[str]] = []
+    label: str
+
+    if req.cases_upload_id is not None:
+        cases_path = _uploaded_cases.get(req.cases_upload_id)
+        if cases_path is None or not cases_path.exists():
+            raise HTTPException(status_code=404,
+                                detail=f"no uploaded cases file for id {req.cases_upload_id!r} "
+                                       "— upload one via /api/control/upload-cases first")
+        label = f"batch (uploaded {cases_path.name}) seed={req.seed} holdout={req.holdout}"
+        steps.append([py, "scripts/run_batch.py", "--cases", str(cases_path),
+                      "--db", config.DB_PATH, "--seed", str(req.seed),
+                      "--holdout", str(req.holdout), "--live-links", str(req.live_links)])
+    else:
+        label = f"batch n={req.n} seed={req.seed} holdout={req.holdout}"
+        steps.append([py, "scripts/generate_synthetic.py", "--n", str(req.n),
+                      "--seed", str(req.seed), "--out", "synthetic_cases.json"])
+        steps.append([py, "scripts/run_batch.py", "--cases", "synthetic_cases.json",
+                      "--db", config.DB_PATH, "--holdout", str(req.holdout),
+                      "--live-links", str(req.live_links)])
+
+    job = Job("batch", label, steps)
     return _start(job, after=lambda _j: {"summary": metrics.summary()}, reopen_db=True).snapshot()
+
+
+# -------------------------------------------------------------- CSV upload
+class UploadCasesRequest(BaseModel):
+    csv_content: str = Field(description="the raw CSV text — see scripts/csv_to_cases.py "
+                                         "for the column format")
+    filename: str = Field(default="uploaded.csv")
+    seed: int = Field(default=42, description="fills in whatever the CSV leaves blank "
+                                              "(amount, timing, error flavour)")
+
+
+_MAX_UPLOAD_BYTES = 2_000_000  # a CSV of cases, not an arbitrary file drop
+_MAX_UPLOAD_ROWS = 5_000
+
+
+@router.post("/upload-cases")
+def upload_cases(req: UploadCasesRequest) -> dict[str, Any]:
+    """Convert a user-supplied CSV into a cases file, exactly the way
+    `scripts/csv_to_cases.py` would from a terminal, and register it so `/batch` can
+    replay it. Sent as JSON text rather than multipart: the whole control API is JSON,
+    and a CSV of cases is well within a JSON string's size for what this is (a
+    single-operator local demo, not a file-hosting service) — see `_MAX_UPLOAD_BYTES`.
+    """
+    _guard()
+    raw = req.csv_content
+    if len(raw.encode("utf-8")) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"CSV exceeds {_MAX_UPLOAD_BYTES} bytes")
+    row_count = sum(1 for _ in io.StringIO(raw)) - 1  # minus the header
+    if row_count > _MAX_UPLOAD_ROWS:
+        raise HTTPException(status_code=413, detail=f"CSV has more than {_MAX_UPLOAD_ROWS} rows")
+
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", Path(req.filename).name) or "uploaded.csv"
+    upload_id = f"upload_{uuid.uuid4().hex[:12]}"
+    UPLOADS_DIR.mkdir(exist_ok=True)
+    csv_path = UPLOADS_DIR / f"{upload_id}_{safe_name}"
+    cases_path = UPLOADS_DIR / f"{upload_id}.json"
+    csv_path.write_text(raw, encoding="utf-8")
+
+    py = sys.executable
+    job = Job("cases_upload", f"convert {safe_name} (seed {req.seed})",
+              [[py, "scripts/csv_to_cases.py", "--csv", str(csv_path),
+                "--out", str(cases_path), "--seed", str(req.seed)]])
+
+    def after(j: Job) -> dict[str, Any]:
+        if j.status != "passed" or not cases_path.exists():
+            return {"upload_id": None, "cases_file": None}
+        _uploaded_cases[upload_id] = cases_path
+        return {"upload_id": upload_id, "cases_file": str(cases_path)}
+
+    return _start(job, after=after).snapshot()
 
 
 # -------------------------------------------------------------------- jobs API
@@ -325,7 +409,16 @@ _DEMO_ERRORS = {
                               "3DS authentication failed", "customer"),
     "invalid_payment_method": ("BAD_REQUEST_ERROR", "payment_failed",
                                "The card number is invalid", "customer"),
-    "unknown": ("GATEWAY_ERROR", "payment_failed", "", "gateway"),
+    # NOT genuinely empty. Empty error fields hit R7 (`apply_rules` short-circuits
+    # before ever building rule-matching text) and never reach a model either — same
+    # as every other row here, that path never demonstrates a real model call. This is
+    # deliberately real, unclassifiable-by-rule text: the same flavour
+    # generate_synthetic.py's LLM_FALLBACK_FLAVOURS uses, verified there to contain no
+    # substring any of R1–R6 match, so this is the one preset in this table that
+    # actually reaches `llm.classify()` on the live path.
+    "unknown": ("BAD_REQUEST_ERROR", "payment_failed",
+               "The customer's bank did not permit this standing instruction at this time",
+               "bank"),
 }
 
 
