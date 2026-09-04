@@ -148,6 +148,26 @@ Reading the table honestly:
   here is the *mechanism*: synthetic cases traverse the identical code path as live
   webhooks, entering only through `intake()` and advancing only through `tick()`.
 
+## Screenshots
+
+The Next.js console (`cd web && npm run dev`), pointed at a populated `recovery.db`.
+
+| Overview — the headline, net of cost | Control room — reproduce and replay |
+|---|---|
+| ![Overview](docs/screenshots/overview.jpg) | ![Control room](docs/screenshots/control-room.jpg) |
+
+| Cases — every headline number resolves to this list | Results — one primary metric, one secondary |
+|---|---|
+| ![Cases](docs/screenshots/cases.jpg) | ![Results](docs/screenshots/results.jpg) |
+
+### Codebase graph
+
+Generated from this repo's own source — 916 nodes, 2,131 edges, 62 detected
+communities, from the executor and audit-chain core out through the docs and the
+Next.js console:
+
+![Codebase knowledge graph](docs/screenshots/knowledge-graph.jpg)
+
 ## The one live case
 
 Case `case_01M0STYHMCZK8CNBR5E2DBJ000` is real: a `payment.failed` body signed with the
@@ -618,15 +638,31 @@ uvicorn app.main:app --reload      # the API on :8000
 cd web && npm run dev              # the console on :3000
 ```
 
-App Router, TypeScript, Tailwind. Every read path is a **server component**; the control
-room is the single client component, because polling a running job is the only thing here
-that needs a browser. The API client is generated from the FastAPI OpenAPI schema, so a
-renamed route breaks the build instead of a page.
+App Router, TypeScript, Tailwind. Every **read** path is a server component — the pages
+that draw the batch send no JavaScript to do it. The client components are the ones that
+genuinely need a browser: the navigation (it reads the current route, and owns the mobile
+drawer), the control room (it polls a running job), and the three live-demo surfaces. The
+API client is generated from the FastAPI OpenAPI schema, so a renamed route breaks the
+build instead of a page.
 
 Three screens exist here that the vanilla dashboard never had: `/queue` (the ₹40 handoff
 queue), `/cases/[id]` (the voice-and-promise timeline) and `/fencing` (the compensation
-log). The vanilla dashboard at `/` still ships and still works — it is deleted only once
-every one of its nine sections has an equivalent, and until then both are maintained.
+log).
+
+**The live demo** — one real Razorpay failure, watched against the running server rather
+than replayed — is three routes:
+
+| Route | Who it is for |
+|---|---|
+| `/demo` | **Test mode.** Start here. Links the two below, and injects any of the six causes directly for the rules test-mode checkout cannot reach |
+| `/subscribe` | The customer. A plain subscribe-and-pay page — no stage names, no rule IDs, no rupee-at-risk |
+| `/pipeline?demo_id=…` | The operator. The same case in stages and rule IDs, updating within a second of each webhook |
+
+`/subscribe` and `/pipeline` deliberately render without the console rail: one is a
+different product with a different name on it, the other is a companion window.
+
+The vanilla dashboard at `/` still ships and still works — it is deleted only once every
+one of its sections has an equivalent, and Test mode was the last gap.
 See [`web/README.md`](web/README.md).
 
 ## Documentation
