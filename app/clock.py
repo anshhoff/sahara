@@ -49,6 +49,48 @@ class SimulatedClock(Clock):
         self._now = when.astimezone(timezone.utc)
 
 
+class OffsetClock(Clock):
+    """Real wall-clock, moved forward by a fixed offset.
+
+    The scripted demo (`POST /api/demo/run`) needs to walk a case through three attempts
+    in ninety seconds, and the waits between those attempts are real: RETRY_LATER is
+    scheduled 12-72h out by the policy table, and invariant I2 holds 24h between two
+    customer contacts. Those waits are the product, not an obstacle, so the demo does
+    not delete them and it does not edit the records that encode them — editing
+    `last_contact_at` to make I2 pass would be forging the evidence that I2 works.
+
+    Instead the demo moves *the clock*. Every gate is then evaluated by its own
+    unmodified code against a later `now()`, exactly as it would be evaluated tomorrow.
+    `simulated` stays False because this is still wall-clock time: the batch's
+    SimulatedClock replaces time, this one fast-forwards it, and stage timings taken
+    during a demo run are as real as any other.
+
+    Process-global, like `set_clock` itself. The demo runner holds it for the length of
+    one run and restores the previous clock in a `finally`.
+    """
+
+    simulated = False
+
+    def __init__(self) -> None:
+        self._offset = timedelta(0)
+
+    @property
+    def offset(self) -> timedelta:
+        return self._offset
+
+    def now(self) -> datetime:
+        return datetime.now(timezone.utc) + self._offset
+
+    def skip(self, **kwargs) -> datetime:
+        """Move the demo forward. Only ever forward — a gate that has already been
+        cleared must not be un-cleared underneath a decision that relied on it."""
+        delta = timedelta(**kwargs)
+        if delta < timedelta(0):
+            raise ValueError("the demo clock only moves forward")
+        self._offset += delta
+        return self.now()
+
+
 _clock: Clock = Clock()
 
 
