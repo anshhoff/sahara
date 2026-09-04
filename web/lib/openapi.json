@@ -1268,6 +1268,30 @@
         ]
       }
     },
+    "/api/voice-calls": {
+      "get": {
+        "description": "Every voice call placed, the transcript, and the reading taken from it.\n\nDeliberately NOT folded into /summary. The transcripts are the one payload here\nthat grows with the batch rather than with the number of metrics, and a summary\nendpoint that carries ninety utterances is a summary endpoint nobody can read.",
+        "operationId": "voice_calls_api_voice_calls_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Voice Calls Api Voice Calls Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Voice Calls",
+        "tags": [
+          "dashboard"
+        ]
+      }
+    },
     "/healthz": {
       "get": {
         "operationId": "healthz_healthz_get",

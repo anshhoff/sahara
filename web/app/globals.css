@@ -1,57 +1,109 @@
 @import "tailwindcss";
 
 /* =============================================================================
-   Sahara — console tokens
+   Sahara — console design tokens
 
-   Ported VERBATIM from dashboard/style.css. The palette was already considered:
-   every contrast ratio in the comments below was measured, and the held-out arm
-   already has its own colour throughout, which is the one piece of the palette
-   that carries a meaning the rest does not. Re-picking colours during a framework
-   swap would have thrown that away for nothing.
+   The semantic palette below started life in dashboard/style.css and the hues are
+   kept: every contrast ratio in the comments was measured, and the held-out arm has
+   its own colour throughout, which is the one piece of the palette that carries a
+   meaning the rest does not. Re-picking those hues would have thrown that away.
 
-   One light theme, deliberately. A dashboard read over someone's shoulder in a
-   bright room is a light-mode dashboard, and a second palette costs more than it
-   ever returned here.
+   What changed is everything around them — a real type scale, a real spacing scale,
+   a real elevation scale, and surfaces that separate rather than merge. The old sheet
+   had colour and nothing else, so every element on every page rendered at the same
+   visual weight and the reader had no idea where to look first.
 
-   Colour never carries meaning alone — every coloured badge and bar ships with its
-   own label, so the palette is emphasis, never information.
+   One light theme, deliberately. A dashboard read over someone's shoulder in a bright
+   room is a light-mode dashboard, and a second palette costs more than it returns.
+
+   Colour never carries meaning alone — every coloured badge ships with its own label
+   and, where it marks a state, its own dot. The palette is emphasis, never information.
 ============================================================================= */
 :root {
-  --bg:            #f4f5f7;
+  /* ---- surfaces ------------------------------------------------------------
+     Four steps, each a visible move from the last. The old sheet had --bg and
+     --surface two percent apart, which is why every card looked painted onto the
+     page rather than sitting on it. */
+  --bg:            #f1f3f7;
   --surface:       #ffffff;
-  --surface-2:     #f8f9fb;
-  --surface-3:     #eff1f5;
-  --border:        #e3e6ec;
-  --border-2:      #d3d8e0;
+  --surface-2:     #f7f8fb;
+  --surface-3:     #eceff4;
+  --surface-sunk:  #e7eaf1;
+  --border:        #dfe3ea;   /* hairlines between rows */
+  --border-2:      #cbd2dd;   /* structural edges, table heads */
 
-  --text:          #16181d;   /* 15.8:1 on white */
-  --text-2:        #545a66;   /* 7.4:1  on white */
-  --text-3:        #767d8b;   /* 4.6:1  — smallest labels only */
+  --text:          #14161b;   /* 16.4:1 on white */
+  --text-2:        #4e5563;   /* 8.0:1  on white */
+  --text-3:        #737a88;   /* 4.8:1  — smallest labels only */
 
-  --accent:        #3054d1;   /* 6.4:1 on white */
+  --accent:        #2c4fcb;   /* 6.8:1 on white */
+  --accent-2:      #1c3596;   /* hover / pressed */
   --accent-soft:   #eef1fd;
-  --accent-line:   #c3cdf6;
+  --accent-line:   #bdc9f4;
   --on-accent:     #ffffff;
 
-  --ok:            #10715a;
-  --ok-soft:       #e6f4ef;
-  --warn:          #8a5300;
-  --warn-soft:     #fbf0dd;
-  --danger:        #b32536;
-  --danger-soft:   #fdecee;
-  --control:       #6b3fc4;   /* the held-out arm, everywhere */
-  --control-soft:  #f1ecfd;
-  --neutral:       #5c6473;
-  --neutral-soft:  #eef0f3;
+  --ok:            #0e6b55;
+  --ok-soft:       #e4f3ee;
+  --ok-line:       #a9d9cb;
+  --warn:          #855000;
+  --warn-soft:     #fbefdb;
+  --warn-line:     #e8cf9d;
+  --danger:        #ab2233;
+  --danger-soft:   #fdeaed;
+  --danger-line:   #f0bcc3;
+  --control:       #6535c2;   /* the held-out arm, everywhere */
+  --control-soft:  #f0ebfd;
+  --control-line:  #d2c2f5;
+  --neutral:       #566073;
+  --neutral-soft:  #ebeef3;
+  --neutral-line:  #d2d8e2;
 
-  --shadow-1: 0 1px 2px rgba(19, 24, 39, .05);
-  --shadow-2: 0 1px 3px rgba(19, 24, 39, .07), 0 8px 24px -10px rgba(19, 24, 39, .18);
+  /* ---- elevation -----------------------------------------------------------
+     Three steps and no more. A card, a raised card, an overlay. Anything that
+     needed a fourth was really asking for a border. */
+  --shadow-1: 0 1px 2px rgba(17, 22, 36, .04), 0 1px 1px rgba(17, 22, 36, .03);
+  --shadow-2: 0 1px 2px rgba(17, 22, 36, .05), 0 6px 16px -8px rgba(17, 22, 36, .16);
+  --shadow-3: 0 2px 4px rgba(17, 22, 36, .06), 0 16px 40px -12px rgba(17, 22, 36, .24);
 
+  /* ---- radii --------------------------------------------------------------- */
+  --r-xs: 4px;
   --r-sm: 6px;
-  --r:    10px;
-  --r-lg: 14px;
-  --rail: 246px;
-  --gap:  16px;
+  --r:    9px;
+  --r-lg: 13px;
+  --r-xl: 18px;
+
+  /* ---- spacing: a 4px rhythm, named so pages stop inventing their own ------- */
+  --s-1:  4px;
+  --s-2:  8px;
+  --s-3:  12px;
+  --s-4:  16px;
+  --s-5:  20px;
+  --s-6:  24px;
+  --s-8:  32px;
+  --s-10: 40px;
+  --s-12: 48px;
+
+  /* ---- type scale ---------------------------------------------------------- */
+  --t-micro: 11px;
+  --t-xs:    12px;
+  --t-sm:    13px;
+  --t-base:  14px;
+  --t-md:    15px;
+  --t-lg:    18px;
+  --t-xl:    22px;
+  --t-2xl:   28px;
+  --t-3xl:   36px;
+  --t-4xl:   46px;
+
+  /* ---- motion: one duration set, so nothing feels out of rhythm ------------- */
+  --ease:      cubic-bezier(.32, .72, 0, 1);
+  --dur-fast:  120ms;
+  --dur:       180ms;
+  --dur-slow:  260ms;
+
+  --rail: 236px;
+  --topbar: 52px;
+  --content-max: 1440px;
 }
 
 @theme inline {
@@ -59,6 +111,7 @@
   --color-surface: var(--surface);
   --color-surface-2: var(--surface-2);
   --color-surface-3: var(--surface-3);
+  --color-surface-sunk: var(--surface-sunk);
   --color-line: var(--border);
   --color-line-2: var(--border-2);
   --color-ink: var(--text);
@@ -78,35 +131,148 @@
   --color-neutral-soft: var(--neutral-soft);
   --radius-card: var(--r);
   --radius-lg: var(--r-lg);
+
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: var(--font-mono-face), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
-html, body {
+* { border-color: var(--border); }
+
+html {
   background: var(--bg);
-  color: var(--text);
+  -webkit-text-size-adjust: 100%;
 }
 
 body {
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  font-size: 14px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-inter), ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: var(--t-base);
+  line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* Inter's defaults leave the digits proportional and the "a"/"g" double-storey
+     at small sizes; cv11 and the contextual alternates are what make a 12px label
+     legible rather than merely small. */
+  font-feature-settings: "cv11", "ss01";
+}
+
+h1, h2, h3, h4 {
+  letter-spacing: -0.011em;
+  text-wrap: balance;
 }
 
 /* Tabular figures everywhere a number sits in a column. Proportional digits make a
    table of rupee amounts impossible to scan down, which is the only thing anyone
    ever does with a table of rupee amounts. */
-.tnum { font-variant-numeric: tabular-nums; }
+.tnum { font-variant-numeric: tabular-nums; font-feature-settings: "tnum", "cv11"; }
+
 .mono {
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-family: var(--font-mono-face), ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   font-size: .92em;
+  font-variant-ligatures: none;
+}
+
+/* An eyebrow: the small caps label above a figure or over a group of nav items.
+   Uppercase at 11px needs tracking or it reads as a smudge. */
+.eyebrow {
+  font-size: var(--t-micro);
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--text-3);
 }
 
 /* Focus is never removed, only restyled. */
-:where(a, button, [tabindex]):focus-visible {
+:where(a, button, summary, [tabindex], input, select):focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
 }
 
+/* Anything that can be clicked says so. */
+:where(a[href], button:not(:disabled), summary, [role="button"]) { cursor: pointer; }
+
+/* The skip link: present for keyboard users, out of the way for everyone else. */
+.skip-link {
+  position: fixed;
+  top: var(--s-2);
+  left: var(--s-2);
+  z-index: 100;
+  transform: translateY(-200%);
+  background: var(--surface);
+  color: var(--accent);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--r-sm);
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--t-sm);
+  font-weight: 600;
+  box-shadow: var(--shadow-2);
+  transition: transform var(--dur) var(--ease);
+}
+.skip-link:focus { transform: translateY(0); }
+
+/* Scrollbars, so the rail and the wide tables do not each render a different one. */
+@supports (scrollbar-width: thin) {
+  * { scrollbar-width: thin; scrollbar-color: var(--border-2) transparent; }
+}
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border-2);
+  border: 3px solid var(--bg);
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
+
+/* A wide table scrolls inside its own panel and fades at the edge it is cut at, so
+   a column running off the right is visible as a cut rather than as the end. */
+.scroll-x {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+/* Details/summary is used for the audit-entry disclosure; the default marker is
+   inconsistent across browsers, so it is replaced with our own chevron — replaced,
+   not merely removed: a disclosure with no affordance is a line of text nobody clicks. */
+details > summary { list-style: none; display: flex; align-items: center; gap: 6px; }
+details > summary::-webkit-details-marker { display: none; }
+details > summary::before {
+  content: "";
+  flex: none;
+  width: 0; height: 0;
+  border-left: 4.5px solid currentColor;
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  transition: transform var(--dur) var(--ease);
+}
+details[open] > summary::before { transform: rotate(90deg); }
+
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Print: the rail is navigation, and navigation does not belong on paper. */
+@media print {
+  :root { --bg: #fff; }
+  [data-print-hide] { display: none !important; }
+  main { padding: 0 !important; }
+  section { break-inside: avoid; box-shadow: none !important; }
+}
+
+/* Tailwind ships sr-only; kept explicit here so the skeleton's label does not depend
+   on a utility being generated for a single use site. */
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }

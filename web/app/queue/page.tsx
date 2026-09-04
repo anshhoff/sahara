@@ -69,7 +69,16 @@ export default async function QueuePage() {
           {rows.length === 0 ? (
             <Empty>Nothing is waiting for a person in this batch.</Empty>
           ) : (
-            <Table head={["Case", "Cause", "Why it is here", "Attempts", "₹ at risk", "Closed"]}>
+            <Table
+              head={[
+                "Case",
+                "Cause",
+                "Why it is here",
+                { label: "Attempts", num: true },
+                { label: "₹ at risk", num: true },
+                "Closed",
+              ]}
+            >
               {rows.map((c) => (
                 <Row key={c.case_id}>
                   <Cell>

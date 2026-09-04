@@ -1,7 +1,7 @@
 # web — the Next.js console
 
-App Router, TypeScript, Tailwind v4. Reads the FastAPI backend; writes nothing except
-through the control room.
+App Router, TypeScript, Tailwind v4. Reads the FastAPI backend; the only writes are the
+control room and the live-demo routes.
 
 ```bash
 uvicorn app.main:app --reload      # terminal 1 — the API on :8000
@@ -10,17 +10,36 @@ cd web && npm run dev              # terminal 2 — the console on :3000
 
 `NEXT_PUBLIC_API_BASE` overrides the API origin (default `http://127.0.0.1:8000`).
 
-## Server components everywhere except one
+## Server components for every read
 
 Every read path is a server component. The console's job is to show what the database
 says, and shipping a client bundle to draw a table of numbers that never change after
-render is work for nothing. `app/control/page.tsx` is the single `"use client"` file:
-it polls a running job's output, which genuinely needs a browser.
+render is work for nothing.
 
-That split is also why CORS only affects one page. Server components fetch from Node,
-where no browser policy applies; the control room fetches from the browser, so
-`app/main.py` allows the dev origins explicitly — never `*`, because this API is
-unauthenticated by design on a single-operator local app.
+The `"use client"` files are the ones that cannot be anything else:
+
+| File | Why it needs a browser |
+|---|---|
+| `components/Nav.tsx` | reads the current route for the active state, and owns the mobile drawer |
+| `components/Shell.tsx` | decides which routes get the console rail (see below) |
+| `app/control/page.tsx` | polls a running job's output |
+| `app/demo`, `app/subscribe`, `app/pipeline` | Razorpay Checkout, and a 1s poll on a live case |
+
+That split is also what makes CORS matter for some pages and not others. Server
+components fetch from Node, where no browser policy applies; the control room and the
+demo routes fetch from the browser, so `app/main.py` allows the dev origins explicitly —
+never `*`, because this API is unauthenticated by design on a single-operator local app.
+
+## Two surfaces that are not the console
+
+`/subscribe` is the customer's view of a failed charge and `/pipeline` is the operator
+window it pops open beside itself. Neither gets the nine-item rail: one is a different
+product with a different name on it, the other is a companion panel, not a destination.
+
+`components/Shell.tsx` decides this from the pathname. A `(console)` route group would be
+the more idiomatic App Router answer and was the alternative considered; it was not worth
+renaming every existing path to add two pages, when the rail was already a client
+component reading the pathname for its active state.
 
 ## The typed client
 

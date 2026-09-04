@@ -1,6 +1,6 @@
 import { tryGet } from "@/lib/api";
 import type { Summary } from "@/lib/types";
-import { pct, pp, rupees, words } from "@/lib/format";
+import { pp, rupees, words } from "@/lib/format";
 import { Badge, Cell, Empty, Note, Panel, Row, Table } from "@/components/ui";
 import { Interval } from "@/components/CI";
 import { PageHeader } from "@/components/PageHeader";
@@ -45,7 +45,7 @@ export default async function Results() {
           {!s.net.incremental_available ? (
             <Empty>No control arm in this batch. Replay with a holdout to make this measurable.</Empty>
           ) : (
-            <Table head={["Metric", "Estimate and interval", "Reads as"]}>
+            <Table head={["Metric", { label: "Estimate and interval", w: "34%" }, "Reads as"]}>
               <Row>
                 <Cell>
                   <strong>Net incremental recovery</strong>
@@ -118,7 +118,16 @@ export default async function Results() {
             <Empty>{cal.reason}</Empty>
           ) : (
             <>
-              <Table head={["Cause / action", "n", "Prior said", "Realised", "Gap", ""]}>
+              <Table
+                head={[
+                  "Cause / action",
+                  { label: "n", num: true },
+                  { label: "Prior said", num: true },
+                  { label: "Realised", num: true },
+                  { label: "Gap", num: true },
+                  "",
+                ]}
+              >
                 {cal.by_pair.map((p) => (
                   <Row key={`${p.category}/${p.action}`}>
                     <Cell>
@@ -150,7 +159,7 @@ export default async function Results() {
           aside={`${s.declined_to_contact.n_declined} cases · ${s.declined_to_contact.n_control_arm} more held out`}
           lede="What it refused is a harder claim than what it achieved, and it belongs in the headline rather than buried in a stop-status breakdown."
         >
-          <Table head={["Cases", "Why the agent said no"]}>
+          <Table head={[{ label: "Cases", num: true, w: "80px" }, "Why the agent said no"]}>
             {s.declined_to_contact.by_reason
               .filter((r) => r.n && r.status !== "stopped_holdout")
               .map((r) => (
@@ -167,7 +176,15 @@ export default async function Results() {
           {Object.keys(lat).length === 0 ? (
             <Empty>No timing recorded in this batch.</Empty>
           ) : (
-            <Table head={["Stage", "n", "p50", "p95", "max"]}>
+            <Table
+              head={[
+                "Stage",
+                { label: "n", num: true },
+                { label: "p50", num: true },
+                { label: "p95", num: true },
+                { label: "max", num: true },
+              ]}
+            >
               {Object.entries(lat).map(([stage, v]) => (
                 <Row key={stage}>
                   <Cell>{words(stage)}</Cell>

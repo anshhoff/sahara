@@ -642,6 +642,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/voice-calls": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Voice Calls
+         * @description Every voice call placed, the transcript, and the reading taken from it.
+         *
+         *     Deliberately NOT folded into /summary. The transcripts are the one payload here
+         *     that grows with the batch rather than with the number of metrics, and a summary
+         *     endpoint that carries ninety utterances is a summary endpoint nobody can read.
+         */
+        get: operations["voice_calls_api_voice_calls_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/healthz": {
         parameters: {
             query?: never;
@@ -1587,6 +1611,28 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    voice_calls_api_voice_calls_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
         };

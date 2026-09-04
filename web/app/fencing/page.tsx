@@ -1,6 +1,6 @@
 import { tryGet } from "@/lib/api";
 import type { Fencing } from "@/lib/types";
-import { when, words } from "@/lib/format";
+import { when } from "@/lib/format";
 import { Badge, Cell, CaseLink, Empty, Note, Panel, Row, Stat, Table } from "@/components/ui";
 import { PageHeader } from "@/components/PageHeader";
 import { ApiDown } from "@/components/ApiDown";
@@ -78,7 +78,15 @@ export default async function FencingPage() {
             </>
           }
         >
-          <Table head={["Fence", "clear", "settled", "changed", "unverified"]}>
+          <Table
+            head={[
+              { label: "Fence", w: "52%" },
+              { label: "clear", num: true },
+              { label: "settled", num: true },
+              { label: "changed", num: true },
+              { label: "unverified", num: true },
+            ]}
+          >
             {PHASES.map(([key, label, blurb]) => {
               const v = f.by_phase[key] ?? {};
               return (
@@ -110,7 +118,7 @@ export default async function FencingPage() {
               checked.
             </Empty>
           ) : (
-            <Table head={["Case", "seq", "What was done", "When"]}>
+            <Table head={["Case", { label: "seq", num: true }, "What was done", "When"]}>
               {f.compensations.map((c) => (
                 <Row key={`${c.case_id}-${c.seq}`}>
                   <Cell>

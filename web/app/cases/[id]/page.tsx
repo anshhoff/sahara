@@ -60,6 +60,12 @@ export default async function CaseDetail({ params }: { params: Promise<{ id: str
     <>
       <PageHeader
         title={c.id}
+        monoTitle
+        eyebrow="Case file"
+        crumbs={[{ href: "/cases", label: "Cases" }]}
+        actions={
+          <Badge tone={STATUS_TONE[c.status] ?? "neutral"}>{words(c.status)}</Badge>
+        }
         question="The handoff artifact. This page is the complete case file a person picks up — nothing summarised away, nothing withheld."
       />
 
@@ -133,35 +139,69 @@ export default async function CaseDetail({ params }: { params: Promise<{ id: str
           aside={`${file.audit_trail.length} entries, hash-chained`}
           lede="Append-only and gapless from 1. Every entry carries a SHA-256 over its own contents together with its predecessor's, so editing one word — or deleting one row — invalidates every hash after it."
         >
-          <ol className="grid gap-2">
-            {file.audit_trail.map((e) => (
-              <li
-                key={e.seq}
-                className="rounded-[var(--r)] border border-[var(--border)] bg-[var(--surface-2)] p-3"
-              >
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="mono text-[12px] text-[var(--text-3)]">#{e.seq}</span>
-                  <Badge tone={STAGE_TONE[e.stage as keyof typeof STAGE_TONE] ?? "neutral"}>
-                    {e.stage}
-                  </Badge>
-                  <span className="text-[12px] text-[var(--text-3)]">by {e.actor}</span>
-                  <span className="grow" />
-                  <span className="text-[12px] text-[var(--text-3)]">{when(e.created_at)}</span>
-                </div>
-                <p className="mt-2 text-[13px] leading-relaxed">{e.summary}</p>
-                <details className="mt-2">
-                  <summary className="cursor-pointer text-[12px] text-[var(--accent)]">
-                    the full entry
-                  </summary>
-                  <pre className="mono mt-2 max-h-72 overflow-auto rounded-[var(--r-sm)] bg-[var(--surface-3)] p-2 text-[11px] whitespace-pre-wrap">
-                    {JSON.stringify(e.detail, null, 2)}
-                  </pre>
-                  <div className="mono mt-1 text-[11px] text-[var(--text-3)]">
-                    {e.entry_hash ? `hash ${e.entry_hash.slice(0, 32)}…` : "unchained"}
+          {/* A rail, not a stack. Twelve identical bordered cards told the reader
+              nothing about order; the chain is the point of this panel, so the entries
+              hang off one continuous line with a stage-coloured node each, and the
+              boxes go away. The line is drawn on the <li> rather than the <ol> so it
+              stops at the last node instead of running past it. */}
+          <ol className="grid">
+            {file.audit_trail.map((e, i) => {
+              const tone = STAGE_TONE[e.stage as keyof typeof STAGE_TONE] ?? "neutral";
+              const last = i === file.audit_trail.length - 1;
+              return (
+                <li key={e.seq} className="relative flex gap-3 pb-4 last:pb-0">
+                  {/* Both the line and the node are centred with left-1/2 rather than by
+                      the flex container: an absolutely positioned child is placed at its
+                      static position, which justify-center does not move. */}
+                  <div className="relative w-[13px] shrink-0">
+                    {!last && (
+                      <span
+                        aria-hidden="true"
+                        className="absolute top-[16px] bottom-[-16px] left-1/2 w-px -translate-x-1/2 bg-[var(--border-2)]"
+                      />
+                    )}
+                    <span
+                      aria-hidden="true"
+                      className={`absolute top-[6px] left-1/2 h-[9px] w-[9px] -translate-x-1/2 rounded-full ring-4 ring-[var(--surface)] ${
+                        tone === "ok"
+                          ? "bg-[var(--ok)]"
+                          : tone === "warn"
+                            ? "bg-[var(--warn)]"
+                            : tone === "danger"
+                              ? "bg-[var(--danger)]"
+                              : tone === "accent"
+                                ? "bg-[var(--accent)]"
+                                : "bg-[var(--neutral)]"
+                      }`}
+                    />
                   </div>
-                </details>
-              </li>
-            ))}
+
+                  <div className="min-w-0 grow">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                      <span className="mono text-[11.5px] text-[var(--text-3)]">#{e.seq}</span>
+                      <Badge tone={tone}>{e.stage}</Badge>
+                      <span className="text-[12px] text-[var(--text-3)]">by {e.actor}</span>
+                      <span className="grow" />
+                      <span className="tnum text-[11.5px] whitespace-nowrap text-[var(--text-3)]">
+                        {when(e.created_at)}
+                      </span>
+                    </div>
+                    <p className="mt-[5px] text-[13px] leading-relaxed">{e.summary}</p>
+                    <details className="mt-[6px]">
+                      <summary className="w-fit text-[12px] text-[var(--text-3)] transition-colors hover:text-[var(--accent)]">
+                        the full entry
+                      </summary>
+                      <pre className="mono mt-2 max-h-72 overflow-auto rounded-[var(--r-sm)] border border-[var(--border)] bg-[var(--surface-sunk)] p-2 text-[11px] leading-[1.55] whitespace-pre-wrap">
+                        {JSON.stringify(e.detail, null, 2)}
+                      </pre>
+                      <div className="mono mt-1 text-[11px] break-all text-[var(--text-3)]">
+                        {e.entry_hash ? `hash ${e.entry_hash.slice(0, 32)}…` : "unchained"}
+                      </div>
+                    </details>
+                  </div>
+                </li>
+              );
+            })}
           </ol>
         </Panel>
       </div>

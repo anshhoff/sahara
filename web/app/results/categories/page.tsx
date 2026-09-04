@@ -1,7 +1,7 @@
 import { tryGet } from "@/lib/api";
 import type { CategoryLift, Summary } from "@/lib/types";
 import { pct, pp, rupees, words } from "@/lib/format";
-import { Cell, Empty, Note, Panel, Row, Table, Unmeasured } from "@/components/ui";
+import { Bar, Cell, Empty, Note, Panel, Row, Table, Unmeasured } from "@/components/ui";
 import { Interval } from "@/components/CI";
 import { PageHeader } from "@/components/PageHeader";
 import { ApiDown } from "@/components/ApiDown";
@@ -37,6 +37,7 @@ export default async function ByCause() {
     <>
       <PageHeader
         title="By cause"
+        crumbs={[{ href: "/results", label: "Results" }]}
         question="Not every failure is equally recoverable — an expired card does not un-expire, and an empty account often refills by payday."
       />
 
@@ -56,7 +57,14 @@ export default async function ByCause() {
           {lifts.length === 0 ? (
             <Empty>No control arm in this batch, so there is no lift to split.</Empty>
           ) : (
-            <Table head={["Cause", "Treated", "Control", "Lift, with its interval"]}>
+            <Table
+              head={[
+                "Cause",
+                { label: "Treated", num: true },
+                { label: "Control", num: true },
+                { label: "Lift, with its interval", w: "42%" },
+              ]}
+            >
               {lifts
                 .filter((r) => r.treated.n || r.control.n)
                 .map((r) => (
@@ -99,7 +107,16 @@ export default async function ByCause() {
         </Panel>
 
         <Panel title="Recovery by diagnosed cause" aside="gross, both arms combined">
-          <Table head={["Cause", "Cases", "Recovered", "Rate", "₹ at risk", "₹ recovered"]}>
+          <Table
+            head={[
+              "Cause",
+              { label: "Cases", num: true },
+              { label: "Recovered", num: true },
+              { label: "Rate", num: true, w: "20%" },
+              { label: "₹ at risk", num: true },
+              { label: "₹ recovered", num: true },
+            ]}
+          >
             {rows.map((r) => (
               <Row key={r.category}>
                 <Cell>
@@ -112,7 +129,15 @@ export default async function ByCause() {
                 </Cell>
                 <Cell num>{r.n_cases}</Cell>
                 <Cell num>{r.n_recovered}</Cell>
-                <Cell num>{pct(r.recovery_rate)}</Cell>
+                <Cell num>
+                  <span className="flex items-center justify-end gap-2">
+                    <Bar
+                      value={r.recovery_rate}
+                      label={`${words(r.category)} recovery rate ${pct(r.recovery_rate)}`}
+                    />
+                    <span className="w-[46px]">{pct(r.recovery_rate)}</span>
+                  </span>
+                </Cell>
                 <Cell num>{rupees(r.at_risk_paise)}</Cell>
                 <Cell num>{rupees(r.recovered_paise)}</Cell>
               </Row>

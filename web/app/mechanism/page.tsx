@@ -55,7 +55,10 @@ export default async function MechanismPage() {
             {m.invariants.map((i) => (
               <div
                 key={i.code}
-                className="rounded-[var(--r)] border border-[var(--border)] bg-[var(--surface-2)] p-3"
+                /* flex-col + mt-auto on the rule line: the cards in a row stretch to
+                   the tallest, and without this the shorter ones ended in a band of
+                   empty surface that read as missing content rather than as alignment. */
+                className="flex flex-col rounded-[var(--r)] border border-[var(--border)] bg-[var(--surface-2)] p-3"
               >
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="mono rounded-[var(--r-sm)] bg-[var(--surface-3)] px-[6px] py-[2px] text-[12px] font-semibold">
@@ -71,8 +74,8 @@ export default async function MechanismPage() {
                   </Badge>
                   {i.defers > 0 && <Badge tone="warn">{i.defers} deferred</Badge>}
                 </div>
-                <p className="mt-2 text-[13px] leading-relaxed text-[var(--text-2)]">{i.plain}</p>
-                <p className="mono mt-2 border-t border-[var(--border)] pt-2 text-[11px] text-[var(--text-3)]">
+                <p className="mt-2 mb-3 text-[13px] leading-relaxed text-[var(--text-2)]">{i.plain}</p>
+                <p className="mono mt-auto border-t border-[var(--border)] pt-2 text-[11px] leading-relaxed text-[var(--text-3)]">
                   {i.rule}
                 </p>
               </div>
@@ -117,7 +120,7 @@ export default async function MechanismPage() {
         </Panel>
 
         <Panel title="The diagnosis rules" aside="checked first, in order; first hit wins">
-          <Table head={["Rule", "Category", "Matched", "Patterns"]}>
+          <Table head={["Rule", "Category", { label: "Matched", num: true }, { label: "Patterns", w: "46%" }]}>
             {m.rules.map((r) => (
               <Row key={r.id}>
                 <Cell className="mono">{r.id}</Cell>

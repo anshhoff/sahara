@@ -101,6 +101,31 @@ export type Promises = {
   note: string;
 };
 
+export type VoiceCall = {
+  execution_id: string;
+  case_id: string;
+  executed_at: string;
+  transmission: string | null;
+  transcript: string | null;
+  language: string | null;
+  intent: string | null;
+  promised_date: string | null;
+  source: string | null;
+  confidence: number | null;
+  promise_status: "open" | "kept" | "broken" | null;
+  due_at: string | null;
+  mode: string;
+};
+
+export type VoiceCalls = {
+  n_calls: number;
+  n_answered: number;
+  n_promised: number;
+  by_intent: Record<string, number>;
+  calls: VoiceCall[];
+  note: string;
+};
+
 export type Declined = {
   n_declined: number;
   n_control_arm: number;
